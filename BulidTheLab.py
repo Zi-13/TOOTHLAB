@@ -7,6 +7,13 @@ import sqlite3
 import os
 from datetime import datetime
 from pathlib import Path
+# 高性能库导入
+from scipy import ndimage
+from skimage.segmentation import watershed
+from skimage.feature import peak_local_max
+from skimage.morphology import remove_small_objects, binary_opening, disk
+from skimage.measure import label, regionprops
+from scipy.ndimage import distance_transform_edt
 
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']  # 黑体
 matplotlib.rcParams['axes.unicode_minus'] = False
@@ -39,11 +46,44 @@ class ToothTemplateBuilder:
         conn.close()
         print(f"✅ 数据库初始化完成: {self.database_path}")
 
-    def serialize_contours(self, valid_contours, tooth_id, image_path, hsv_info=None):
+    def get_next_tooth_id(self):
+        """生成下一个连续的牙模编号"""
+        contours_dir = self.templates_dir / "contours"
+        if not contours_dir.exists():
+            return "TOOTH_001"
+        
+        existing_files = list(contours_dir.glob("TOOTH_*.json"))
+        if not existing_files:
+            return "TOOTH_001"
+        
+        # 提取编号并找到最大值
+        max_num = 0
+        for file in existing_files:
+            try:
+                num_str = file.stem.split('_')[1]  # TOOTH_001 -> 001
+                num = int(num_str)
+                max_num = max(max_num, num)
+            except (IndexError, ValueError):
+                continue
+        
+        return f"TOOTH_{max_num + 1:03d}"
+
+    def serialize_contours(self, valid_contours, tooth_id=None, image_path=None, hsv_info=None, auto_save=False):
+        """序列化轮廓数据
+        Args:
+            valid_contours: 有效轮廓列表
+            tooth_id: 牙模ID，如果为None则自动生成
+            image_path: 图像路径
+            hsv_info: HSV颜色信息
+            auto_save: 是否自动保存（无需用户确认）
+        """
         try:
+            if tooth_id is None:
+                tooth_id = self.get_next_tooth_id()
+            
             template_data = {
                 "tooth_id": tooth_id,
-                "image_path": image_path,
+                "image_path": str(image_path) if image_path else None,
                 "created_at": datetime.now().isoformat(),
                 "hsv_info": hsv_info,
                 "num_contours": len(valid_contours),
@@ -75,10 +115,23 @@ class ToothTemplateBuilder:
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(template_data, f, ensure_ascii=False, indent=2)
             
+            # 同时保存轮廓图像（PNG格式）
+            png_filename = f"{tooth_id}.png"
+            png_path = self.templates_dir / "images" / png_filename
+            png_path.parent.mkdir(exist_ok=True)
+            
+            # 创建轮廓图像
+            if hasattr(self, 'current_image') and self.current_image is not None:
+                contour_img = self.current_image.copy()
+                for contour_info in valid_contours:
+                    cv2.drawContours(contour_img, [contour_info['contour']], -1, (0, 255, 0), 2)
+                cv2.imwrite(str(png_path), contour_img)
+            
             # 保存到数据库
             self.save_to_database(template_data, json_filename, image_path)
             
-            print(f"✅ 模板已保存: {tooth_id} ({len(valid_contours)}个轮廓)")
+            save_type = "自动保存" if auto_save else "手动保存"
+            print(f"✅ 模板已{save_type}: {tooth_id} ({len(valid_contours)}个轮廓)")
             return True
             
         except Exception as e:
@@ -124,6 +177,86 @@ class ToothTemplateBuilder:
             print("📭 暂无保存的模板")
         return templates
 
+    def load_saved_contours(self, tooth_id):
+        """加载已保存的轮廓数据用于比对
+        Args:
+            tooth_id: 牙模ID
+        Returns:
+            dict: 包含轮廓信息的字典，失败返回None
+        """
+        json_path = self.templates_dir / "contours" / f"{tooth_id}.json"
+        if not json_path.exists():
+            print(f"❌ 模板文件不存在: {tooth_id}")
+            return None
+        
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                template_data = json.load(f)
+            print(f"✅ 成功加载模板: {tooth_id}")
+            return template_data
+        except Exception as e:
+            print(f"❌ 加载模板失败: {e}")
+            return None
+
+    def compare_with_saved_template(self, current_contours, template_tooth_id):
+        """简单的轮廓比对示例
+        Args:
+            current_contours: 当前检测到的轮廓列表
+            template_tooth_id: 要比对的模板ID
+        Returns:
+            dict: 比对结果
+        """
+        template_data = self.load_saved_contours(template_tooth_id)
+        if not template_data:
+            return {"success": False, "error": "无法加载模板"}
+        
+        current_count = len(current_contours)
+        template_count = template_data['num_contours']
+        
+        # 简单的数量和面积比对
+        current_total_area = sum(info['area'] for info in current_contours)
+        template_total_area = template_data['total_area']
+        
+        area_similarity = min(current_total_area, template_total_area) / max(current_total_area, template_total_area)
+        count_match = current_count == template_count
+        
+        result = {
+            "success": True,
+            "template_id": template_tooth_id,
+            "current_count": current_count,
+            "template_count": template_count,
+            "count_match": count_match,
+            "current_area": current_total_area,
+            "template_area": template_total_area,
+            "area_similarity": area_similarity,
+            "is_similar": area_similarity > 0.8 and count_match
+        }
+        
+        print(f"\n📊 轮廓比对结果:")
+        print(f"   模板ID: {template_tooth_id}")
+        print(f"   轮廓数量: {current_count} vs {template_count} ({'✅ 匹配' if count_match else '❌ 不匹配'})")
+        print(f"   总面积: {current_total_area:.1f} vs {template_total_area:.1f}")
+        print(f"   面积相似度: {area_similarity:.3f}")
+        print(f"   整体相似: {'✅ 是' if result['is_similar'] else '❌ 否'}")
+        
+        return result
+
+    def list_all_saved_templates(self):
+        """列出所有已保存的模板ID"""
+        contours_dir = self.templates_dir / "contours"
+        if not contours_dir.exists():
+            return []
+        
+        template_files = list(contours_dir.glob("TOOTH_*.json"))
+        template_ids = [f.stem for f in template_files]
+        
+        if template_ids:
+            print(f"\n📁 找到 {len(template_ids)} 个已保存模板:")
+            for tid in sorted(template_ids):
+                print(f"   - {tid}")
+        
+        return sorted(template_ids)
+
 def pick_color_and_draw_edge(image_path, tooth_id=None):
     # 初始化模板建立器
     builder = ToothTemplateBuilder()
@@ -165,10 +298,22 @@ def pick_color_and_draw_edge(image_path, tooth_id=None):
     }
     
     mask = cv2.inRange(hsv, lower, upper)
-    color_extract = cv2.bitwise_and(img, img, mask=mask)
+    
+    # --- 形态学操作分离黏连区域 ---
+    # 先进行开运算去除噪声
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+    
+    # 智能选择分离方法
+    mask_processed = choose_separation_method(mask)
+    
+    # 显示分离效果对比
+    show_separation_comparison(mask, mask_processed, image_path)
+    
+    color_extract = cv2.bitwise_and(img, img, mask=mask_processed)
     
     # --- 记录所有有效轮廓及属性 ---
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    contours, _ = cv2.findContours(mask_processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     valid_contours = []
     
     for i, contour in enumerate(contours):
@@ -192,122 +337,168 @@ def pick_color_and_draw_edge(image_path, tooth_id=None):
     linewidth = max(0.5, 2 - 0.03 * n_contours)
     show_legend = n_contours <= 15
     
-    # 自动生成牙齿ID
+    # 自动生成牙齿ID（连续编号）
     if tooth_id is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tooth_id = f"TOOTH_{timestamp}"
+        tooth_id = builder.get_next_tooth_id()
+    
+    # 保存当前图像到builder中，用于PNG保存
+    builder.current_image = img
     
     # --- 交互式显示 ---
     fig, axes = plt.subplots(1, 3, figsize=(16, 6))
     ax_img, ax_contour, ax_zoom = axes
     
-    ax_img.set_title("颜色提取结果")
-    ax_img.imshow(cv2.cvtColor(color_extract, cv2.COLOR_BGR2RGB))
+    ax_img.set_title("原始图像")
+    ax_img.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     ax_img.axis('off')
     
-    ax_contour.set_title("轮廓显示")
+    ax_contour.set_title("全部轮廓显示")
     ax_contour.axis('equal')
     ax_contour.invert_yaxis()
     ax_contour.grid(True)
     
-    ax_zoom.set_title("色块放大视图")
+    ax_zoom.set_title("选中轮廓放大视图")
     ax_zoom.axis('equal')
+    ax_zoom.invert_yaxis()
     ax_zoom.grid(True)
     
     selected_idx = [0]  # 用列表包裹以便闭包修改
     saved = [False]  # 保存状态
     
+    # 自动保存模板（无需用户操作）
+    print(f"🚀 自动保存模板中...")
+    success = builder.serialize_contours(valid_contours, tooth_id, image_path, hsv_info, auto_save=True)
+    if success:
+        saved[0] = True
+        print(f"✅ 模板已自动保存为: {tooth_id}")
+    else:
+        print(f"❌ 自动保存失败")
+    
     def draw_all(highlight_idx=None):
+        # 中间图：显示全部轮廓
         ax_contour.clear()
-        ax_contour.set_title(f"轮廓显示 - 牙齿ID: {tooth_id}")
+        ax_contour.set_title(f"全部轮廓显示 - 牙齿ID: {tooth_id}")
         ax_contour.axis('equal')
         ax_contour.invert_yaxis()
         ax_contour.grid(True)
         
+        # 在原图上叠加所有轮廓
+        img_display = img.copy()
+        
         # 准备颜色列表
-        colors = plt.cm.tab10(np.linspace(0, 1, max(len(valid_contours), 10)))
+        colors_bgr = [(0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 255, 255), (255, 0, 255), (255, 255, 0)]
+        colors_plt = plt.cm.tab10(np.linspace(0, 1, max(len(valid_contours), 10)))
         
         for j, info in enumerate(valid_contours):
-            points = info['points']
-            label = f"区域{info['idx']+1}"
+            contour = info['contour']
+            color_bgr = colors_bgr[j % len(colors_bgr)]
             
             if highlight_idx is not None and j == highlight_idx:
-                fill_color = 'red'
-                edge_color = 'darkred'
-                lw = linewidth * 2
-                alpha = 0.7
-                zorder = 10
+                # 高亮显示选中的轮廓
+                cv2.drawContours(img_display, [contour], -1, (0, 0, 255), 3)
+                # 添加标记点
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    cv2.circle(img_display, (cx, cy), 8, (0, 0, 255), -1)
+                    cv2.putText(img_display, f'{j+1}', (cx-8, cy+5), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             else:
-                fill_color = colors[j % len(colors)]
-                edge_color = 'black'
-                lw = linewidth
-                alpha = 0.5
-                zorder = 1
-            
-            x = points[:, 0]
-            y = points[:, 1]
-            
-            # 填充色块区域
-            ax_contour.fill(x, y, color=fill_color, alpha=alpha, zorder=zorder, label=label if show_legend else None)
-            # 绘制轮廓边界
-            ax_contour.plot(x, y, '-', color=edge_color, linewidth=lw, zorder=zorder+1)
-            
-        if show_legend:
-            ax_contour.legend()
+                # 普通显示其他轮廓
+                cv2.drawContours(img_display, [contour], -1, color_bgr, 2)
+                # 添加编号
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    cv2.putText(img_display, f'{j+1}', (cx-5, cy+3), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # --- 属性信息显示 ---
-        info = valid_contours[highlight_idx if highlight_idx is not None else 0]
-        status = "✅ 已保存" if saved[0] else "❌ 未保存"
-        ax_contour.text(0.02, -0.08, f"区域: {info['idx']+1} | 面积: {info['area']:.1f} | 周长: {info['length']:.1f}",
-                        transform=ax_contour.transAxes, fontsize=10, color='blue')
-        ax_contour.text(0.02, -0.12, f"状态: {status} | 按 's' 保存模板 | 按 'q' 退出",
-                        transform=ax_contour.transAxes, fontsize=10, color='red')
+        ax_contour.imshow(cv2.cvtColor(img_display, cv2.COLOR_BGR2RGB))
+        ax_contour.axis('off')
         
-        # --- 放大视图 ---
+        # 右边图：显示选中轮廓的放大视图
         ax_zoom.clear()
-        ax_zoom.set_title("区域放大视图")
-        ax_zoom.axis('equal')
-        ax_zoom.invert_yaxis()
-        ax_zoom.grid(True)
-        
-        points = info['points']
-        x = points[:, 0]
-        y = points[:, 1]
-        
-        # 在放大视图中显示填充
         if highlight_idx is not None:
-            fill_color = 'red'
-            alpha = 0.7
-        else:
-            fill_color = colors[0 % len(colors)]
-            alpha = 0.5
+            info = valid_contours[highlight_idx]
+            contour = info['contour']
             
-        # 填充区域
-        ax_zoom.fill(x, y, color=fill_color, alpha=alpha)
-        # 绘制轮廓点和连线
-        ax_zoom.plot(x, y, 'k.', markersize=1.5)
-        ax_zoom.plot(x, y, 'black', linewidth=1.5)
+            # 计算轮廓的边界框
+            x, y, w, h = cv2.boundingRect(contour)
+            margin = max(20, max(w, h) * 0.1)  # 自适应边距
+            
+            # 从原图中裁剪区域
+            x1 = max(0, int(x - margin))
+            y1 = max(0, int(y - margin))
+            x2 = min(img.shape[1], int(x + w + margin))
+            y2 = min(img.shape[0], int(y + h + margin))
+            
+            cropped_img = img[y1:y2, x1:x2].copy()
+            
+            # 调整轮廓坐标到裁剪图像的坐标系
+            adjusted_contour = contour.copy()
+            adjusted_contour[:, 0, 0] -= x1
+            adjusted_contour[:, 0, 1] -= y1
+            
+            # 在裁剪图像上绘制轮廓
+            cv2.drawContours(cropped_img, [adjusted_contour], -1, (0, 0, 255), 3)
+            # 创建半透明填充效果
+            overlay = cropped_img.copy()
+            cv2.fillPoly(overlay, [adjusted_contour], (0, 0, 255))
+            cv2.addWeighted(overlay, 0.3, cropped_img, 0.7, 0, cropped_img)
+            
+            ax_zoom.imshow(cv2.cvtColor(cropped_img, cv2.COLOR_BGR2RGB))
+            ax_zoom.set_title(f"选中轮廓 {highlight_idx+1} - 面积: {info['area']:.1f} | 周长: {info['length']:.1f}")
+        else:
+            # 如果没有选中轮廓，显示提示信息
+            ax_zoom.text(0.5, 0.5, '点击轮廓查看放大视图\n←→ 键切换轮廓\nq 键退出\n\n✅ 模板已自动保存', 
+                        ha='center', va='center', transform=ax_zoom.transAxes, 
+                        fontsize=12, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgreen"))
+            ax_zoom.set_title("轮廓放大视图")
         
-        # 自适应缩放
-        margin = 20
-        ax_zoom.set_xlim(x.min()-margin, x.max()+margin)
-        ax_zoom.set_ylim(y.min()-margin, y.max()+margin)
+        ax_zoom.axis('off')
+        
+        # 状态信息显示
+        if highlight_idx is not None:
+            info = valid_contours[highlight_idx]
+            status = "✅ 已自动保存" if saved[0] else "❌ 未保存"
+            status_text = f"状态: {status} | 当前: {highlight_idx+1}/{len(valid_contours)} | 面积: {info['area']:.1f} | 周长: {info['length']:.1f}"
+        else:
+            status = "✅ 已自动保存" if saved[0] else "❌ 未保存"
+            status_text = f"状态: {status} | 共 {len(valid_contours)} 个轮廓 | 操作: ←→切换 q退出"
+        
+        fig.suptitle(status_text, fontsize=12, y=0.02)
         
         fig.canvas.draw_idle()
     
     def on_click(event):
-        if event.inaxes not in [ax_img, ax_contour, ax_zoom]:
+        if event.inaxes != ax_contour:
             return
+        
+        # 获取点击坐标（需要转换到图像坐标系）
+        if event.xdata is None or event.ydata is None:
+            return
+            
+        # 由于ax_contour显示的是图像，坐标系与原图一致
         x, y = int(event.xdata), int(event.ydata)
+        
+        # 检查点击是否在图像范围内
+        if x < 0 or x >= img.shape[1] or y < 0 or y >= img.shape[0]:
+            return
+        
         found = False
         for j, info in enumerate(valid_contours):
+            # 检查点是否在轮廓内
             if cv2.pointPolygonTest(info['contour'], (x, y), False) >= 0:
                 selected_idx[0] = j
                 draw_all(highlight_idx=j)
                 found = True
+                print(f"✅ 选中轮廓 {j+1}")
                 break
+        
         if not found:
-            print("未选中任何色块")
+            print("未选中任何轮廓")
     
     def on_key(event):
         if event.key == 'right':
@@ -316,31 +507,554 @@ def pick_color_and_draw_edge(image_path, tooth_id=None):
         elif event.key == 'left':
             selected_idx[0] = (selected_idx[0] - 1) % n_contours
             draw_all(highlight_idx=selected_idx[0])
-        elif event.key == 's':
-            # 保存模板
-            success = builder.serialize_contours(valid_contours, tooth_id, image_path, hsv_info)
-            if success:
-                saved[0] = True
-                draw_all(highlight_idx=selected_idx[0])
         elif event.key == 'q':
             plt.close()
     
-    draw_all(highlight_idx=selected_idx[0])
+    draw_all(highlight_idx=0 if valid_contours else None)
     fig.canvas.mpl_connect('button_press_event', on_click)
     fig.canvas.mpl_connect('key_press_event', on_key)
     plt.tight_layout()
+    plt.subplots_adjust(top=0.93)  # 为状态信息留出空间
     plt.show()
     
     # 显示已保存的模板列表
     builder.list_templates()
 
-def main():
-    # 可以指定牙齿ID
-    tooth_id = input("🦷 请输入牙齿ID (直接回车自动生成): ").strip()
-    if not tooth_id:
-        tooth_id = None
+def ultra_separate_connected_objects(mask):
+    """
+    超强黏连分离算法 - 专门针对牙齿模型优化，多策略并行
+    """
+    print("🚀 启动超强分离算法...")
     
-    pick_color_and_draw_edge('c:\\Users\\Jason\\Desktop\\ya.jpg', tooth_id)
+    # 步骤1: 预处理
+    mask_bool = mask > 0
+    mask_clean = remove_small_objects(mask_bool, min_size=30, connectivity=2)
+    mask_clean = binary_opening(mask_clean, disk(1))
+    mask_clean = mask_clean.astype(np.uint8) * 255
+    
+    # 步骤2: 距离变换
+    dist_transform = distance_transform_edt(mask_clean)
+    max_dist = np.max(dist_transform)
+    
+    # 步骤3: 超激进参数
+    img_area = mask_clean.shape[0] * mask_clean.shape[1]
+    if img_area > 500000:
+        min_distance = max(int(max_dist * 0.08), 6)
+        threshold_abs = max_dist * 0.1
+        threshold_rel = 0.04
+    elif img_area > 100000:
+        min_distance = max(int(max_dist * 0.06), 4)
+        threshold_abs = max_dist * 0.08
+        threshold_rel = 0.03
+    else:
+        min_distance = max(int(max_dist * 0.05), 3)
+        threshold_abs = max_dist * 0.06
+        threshold_rel = 0.02
+    
+    print(f"💪 超激进参数 - 最小距离: {min_distance}, 阈值: {threshold_abs:.2f}")
+    
+    # 步骤4: 多轮种子点搜索
+    local_maxima = None
+    search_rounds = [
+        (min_distance, threshold_abs, threshold_rel),
+        (max(min_distance//2, 2), threshold_abs * 0.5, threshold_rel * 0.5),
+        (max(min_distance//3, 2), threshold_abs * 0.2, threshold_rel * 0.2),
+        (2, max_dist * 0.03, 0.01)  # 最后一轮极度激进
+    ]
+    
+    for round_idx, (md, ta, tr) in enumerate(search_rounds):
+        local_maxima = peak_local_max(
+            dist_transform,
+            min_distance=md,
+            threshold_abs=ta,
+            threshold_rel=tr,
+            exclude_border=False
+        )
+        print(f"🎯 第{round_idx+1}轮搜索: {len(local_maxima)} 个种子点")
+        
+        if len(local_maxima) > 1:  # 找到多个种子点就停止
+            break
+    
+    if len(local_maxima) == 0:
+        print("❌ 分水岭失败，使用强制形态学分离")
+        return force_separation_with_morphology(mask_clean)
+    
+    # 步骤5: 创建标记，最小扩展
+    markers = np.zeros_like(mask_clean, dtype=np.int32)
+    for i, (y, x) in enumerate(local_maxima):
+        markers[y, x] = i + 1
+    
+    # 极小扩展，保持分离效果
+    expansion_size = max(1, min_distance // 8)
+    if expansion_size > 1:
+        markers = ndimage.binary_dilation(
+            markers > 0, 
+            structure=disk(expansion_size)
+        ).astype(np.int32)
+        markers = label(markers)
+    
+    # 步骤6: 分水岭分割
+    labels = watershed(-dist_transform, markers, mask=mask_clean)
+    
+    # 步骤7: 轻度后处理
+    result_mask = np.zeros_like(mask_clean)
+    regions = regionprops(labels)
+    
+    min_area = 30  # 极低面积要求
+    processed_regions = 0
+    
+    for region in regions:
+        if region.area < min_area:
+            continue
+            
+        region_mask = (labels == region.label).astype(np.uint8) * 255
+        
+        # 极轻的闭运算
+        close_size = max(1, int(np.sqrt(region.area) * 0.01))
+        if close_size > 1:
+            kernel_close = disk(close_size)
+            region_mask = ndimage.binary_closing(region_mask, structure=kernel_close)
+            region_mask = region_mask.astype(np.uint8) * 255
+        
+        result_mask = cv2.bitwise_or(result_mask, region_mask)
+        processed_regions += 1
+    
+    print(f"✅ 超强分离完成！生成 {processed_regions} 个独立区域")
+    return result_mask
+
+def force_separation_with_morphology(mask):
+    """
+    强制形态学分离 - 当分水岭失败时的终极备选方案
+    """
+    print("🔧 启动强制形态学分离...")
+    original_mask = mask.copy()
+    best_result = mask.copy()
+    max_components = 1
+    
+    # 极度激进的腐蚀策略
+    erosion_configs = [
+        (1, (3, 3)), (2, (3, 3)), (3, (3, 3)), (4, (3, 3)), (5, (3, 3)),
+        (1, (5, 5)), (2, (5, 5)), (3, (5, 5)),
+        (1, (7, 7)), (2, (7, 7)),
+        (1, (9, 9))
+    ]
+    
+    for iterations, kernel_size in erosion_configs:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, kernel_size)
+        eroded = cv2.erode(original_mask, kernel, iterations=iterations)
+        
+        # 检查连通分量
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(eroded, connectivity=8)
+        
+        if num_labels > max_components:
+            max_components = num_labels
+            result_mask = np.zeros_like(mask)
+            
+            for i in range(1, num_labels):
+                component_mask = (labels == i).astype(np.uint8) * 255
+                
+                # 渐进式膨胀恢复
+                restore_iterations = min(iterations, 3)  # 限制恢复强度
+                kernel_restore = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
+                                                         (restore_iterations*2+1, restore_iterations*2+1))
+                restored = cv2.dilate(component_mask, kernel_restore, iterations=restore_iterations)
+                
+                # 限制在扩展的原始区域内
+                expanded_original = cv2.dilate(original_mask, np.ones((3,3), np.uint8), iterations=2)
+                restored = cv2.bitwise_and(restored, expanded_original)
+                
+                result_mask = cv2.bitwise_or(result_mask, restored)
+            
+            best_result = result_mask.copy()
+            print(f"💪 形态学方案找到 {max_components-1} 个区域 (腐蚀{iterations}次,核{kernel_size})")
+    
+    print(f"✅ 强制分离完成，最终分离出 {max_components-1} 个区域")
+    return best_result
+    """
+    超强黏连分离算法 - 针对牙齿模型优化
+    """
+    # 步骤1: 预处理 - 去除小噪声和平滑
+    mask_bool = mask > 0
+    mask_clean = remove_small_objects(mask_bool, min_size=30, connectivity=2)
+    mask_clean = binary_opening(mask_clean, disk(1))  # 减少开运算强度
+    mask_clean = mask_clean.astype(np.uint8) * 255
+    
+    # 步骤2: 高精度距离变换
+    dist_transform = distance_transform_edt(mask_clean)
+    
+    # 步骤3: 更激进的参数设置 - 专门针对牙齿黏连
+    img_area = mask_clean.shape[0] * mask_clean.shape[1]
+    max_dist = np.max(dist_transform)
+    
+    # 更激进的参数，强制分离黏连牙齿
+    if img_area > 500000:  # 大图像
+        min_distance = max(int(max_dist * 0.15), 8)  # 降低最小距离
+        threshold_abs = max_dist * 0.2  # 大幅降低阈值
+        threshold_rel = 0.08
+    elif img_area > 100000:  # 中等图像
+        min_distance = max(int(max_dist * 0.12), 6)
+        threshold_abs = max_dist * 0.15
+        threshold_rel = 0.06
+    else:  # 小图像
+        min_distance = max(int(max_dist * 0.1), 4)
+        threshold_abs = max_dist * 0.1
+        threshold_rel = 0.05
+    
+    print(f"🔍 距离变换最大值: {max_dist:.2f}")
+    print(f"📊 参数设置 - 最小距离: {min_distance}, 阈值: {threshold_abs:.2f}")
+    
+    # 步骤4: 寻找局部最大值作为分离种子
+    local_maxima = peak_local_max(
+        dist_transform,
+        min_distance=min_distance,
+        threshold_abs=threshold_abs,
+        threshold_rel=threshold_rel,
+        exclude_border=False
+    )
+    
+    print(f"🎯 检测到 {len(local_maxima)} 个高质量分离种子点")
+    
+    if len(local_maxima) == 0:
+        print("⚠️ 未找到分离点，降低阈值重试...")
+        # 降低阈值重试
+        local_maxima = peak_local_max(
+            dist_transform,
+            min_distance=max(min_distance//2, 3),
+            threshold_abs=threshold_abs * 0.5,
+            threshold_rel=threshold_rel * 0.5
+        )
+        print(f"� 重试后检测到 {len(local_maxima)} 个种子点")
+    
+    if len(local_maxima) == 0:
+        print("❌ 仍未找到分离点，使用备选方案")
+        return advanced_separate_connected_objects(mask_clean)
+    
+    # 步骤5: 创建高质量标记图像
+    markers = np.zeros_like(mask_clean, dtype=np.int32)
+    for i, (y, x) in enumerate(local_maxima):
+        markers[y, x] = i + 1
+    
+    # 使用形态学膨胀扩展标记，但控制扩展程度
+    expansion_size = max(1, min_distance // 4)
+    markers = ndimage.binary_dilation(
+        markers > 0, 
+        structure=disk(expansion_size)
+    ).astype(np.int32)
+    
+    # 重新标记连通分量
+    markers = label(markers)
+    
+    # 步骤6: 高性能分水岭分割
+    labels = watershed(-dist_transform, markers, mask=mask_clean)
+    
+    # 步骤7: 智能后处理
+    result_mask = np.zeros_like(mask_clean)
+    regions = regionprops(labels)
+    
+    min_area = 100  # 最小区域面积
+    processed_regions = 0
+    
+    for region in regions:
+        if region.area < min_area:
+            continue
+            
+        # 获取区域mask
+        region_mask = (labels == region.label).astype(np.uint8) * 255
+        
+        # 形态学闭运算填补空洞，使用自适应核大小
+        close_size = max(1, int(np.sqrt(region.area) * 0.05))
+        kernel_close = disk(close_size)
+        region_mask = ndimage.binary_closing(region_mask, structure=kernel_close)
+        region_mask = region_mask.astype(np.uint8) * 255
+        
+        # 合并到结果
+        result_mask = cv2.bitwise_or(result_mask, region_mask)
+        processed_regions += 1
+    
+    print(f"✅ 高性能分离完成！生成 {processed_regions} 个独立高质量区域")
+    return result_mask
+
+def advanced_separate_connected_objects(mask):
+    """
+    高级分离方法：结合多种形态学操作，不依赖额外库
+    """
+    # 方法1: 基于腐蚀-膨胀的分离
+    kernel_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    eroded = cv2.erode(mask, kernel_erode, iterations=2)
+    
+    # 寻找连通分量
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(eroded, connectivity=8)
+    
+    if num_labels <= 1:  # 没有找到分离的区域
+        print("⚠️ 腐蚀后未找到分离区域，尝试更强的分离")
+        return erosion_dilation_separation(mask)
+    
+    result_mask = np.zeros_like(mask)
+    
+    for i in range(1, num_labels):  # 跳过背景
+        # 获取当前连通分量
+        component_mask = (labels == i).astype(np.uint8) * 255
+        
+        # 对每个分量进行膨胀恢复
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        dilated = cv2.dilate(component_mask, kernel_dilate, iterations=2)
+        
+        # 与原始mask取交集，避免过度膨胀
+        dilated = cv2.bitwise_and(dilated, mask)
+        
+        result_mask = cv2.bitwise_or(result_mask, dilated)
+    
+    print(f"✅ 腐蚀-膨胀分离完成，生成 {num_labels-1} 个区域")
+    return result_mask
+
+def erosion_dilation_separation(mask):
+    """
+    渐进式腐蚀分离算法
+    """
+    original_mask = mask.copy()
+    best_result = mask.copy()
+    max_components = 1
+    
+    # 尝试不同强度的腐蚀
+    for iterations in range(1, 6):
+        for kernel_size in [(3,3), (5,5), (7,7)]:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, kernel_size)
+            eroded = cv2.erode(original_mask, kernel, iterations=iterations)
+            
+            # 检查连通分量
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(eroded, connectivity=8)
+            
+            if num_labels > max_components:
+                max_components = num_labels
+                # 恢复各个分量
+                result_mask = np.zeros_like(mask)
+                
+                for i in range(1, num_labels):
+                    component_mask = (labels == i).astype(np.uint8) * 255
+                    
+                    # 膨胀恢复，但限制在原始区域内
+                    kernel_restore = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (iterations*2+1, iterations*2+1))
+                    restored = cv2.dilate(component_mask, kernel_restore, iterations=iterations)
+                    restored = cv2.bitwise_and(restored, original_mask)
+                    
+                    result_mask = cv2.bitwise_or(result_mask, restored)
+                
+                best_result = result_mask.copy()
+    
+    print(f"✅ 渐进式分离完成，最多分离出 {max_components-1} 个区域")
+    return best_result
+
+def choose_separation_method(mask):
+    """
+    智能选择高性能分离方法
+    """
+    # 计算初始连通分量数
+    num_labels_initial, _, _, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    
+    if num_labels_initial > 2:  # 已经分离，无需处理
+        print("✅ 区域已经分离，无需额外处理")
+        return mask
+    
+    # 分析图像特征
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) == 0:
+        return mask
+    
+    # 计算多个复杂度指标
+    total_area = sum(cv2.contourArea(c) for c in contours)
+    total_perimeter = sum(cv2.arcLength(c, True) for c in contours)
+    
+    # 形状复杂度：周长平方/面积
+    shape_complexity = (total_perimeter ** 2) / (total_area + 1e-6)
+    
+    # 凸性分析
+    total_hull_area = sum(cv2.contourArea(cv2.convexHull(c)) for c in contours)
+    convexity = total_area / (total_hull_area + 1e-6)
+    
+    # 区域紧凑度
+    compactness = (4 * np.pi * total_area) / (total_perimeter ** 2 + 1e-6)
+    
+    print(f"🔍 图像分析结果:")
+    print(f"   📊 形状复杂度: {shape_complexity:.2f}")
+    print(f"   🔄 凸性系数: {convexity:.3f}")
+    print(f"   📐 紧凑度: {compactness:.3f}")
+    
+    # 智能选择分离策略
+    try:
+        # 优先使用高性能的scikit-image算法
+        if shape_complexity > 80 or convexity < 0.7:
+            print("🚀 使用超强分离算法（复杂形状）...")
+            return ultra_separate_connected_objects(mask)
+        elif compactness < 0.3:
+            print("� 使用高性能分水岭算法（非紧凑形状）...")
+            return separate_connected_objects(mask)
+        else:
+            print("⚡ 使用高速形态学方法（简单形状）...")
+            return advanced_separate_connected_objects(mask)
+    except Exception as e:
+        print(f"⚠️ 高性能算法失败: {e}")
+        print("🔄 回退到稳定的OpenCV方法...")
+        return advanced_separate_connected_objects(mask)
+
+def show_separation_comparison(original_mask, processed_mask, image_path):
+    """
+    高性能分离效果可视化对比
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    
+    # 原始图像
+    img = cv2.imread(image_path)
+    if img is not None:
+        axes[0, 0].imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        axes[0, 0].set_title("原始图像", fontsize=14, fontweight='bold')
+        axes[0, 0].axis('off')
+    
+    # 分离前的mask
+    axes[0, 1].imshow(original_mask, cmap='gray')
+    axes[0, 1].set_title("分离前", fontsize=14, fontweight='bold')
+    axes[0, 1].axis('off')
+    
+    # 分离后的mask
+    axes[0, 2].imshow(processed_mask, cmap='gray')
+    axes[0, 2].set_title("分离后", fontsize=14, fontweight='bold')
+    axes[0, 2].axis('off')
+    
+    # 轮廓对比 - 分离前
+    contours_before, _ = cv2.findContours(original_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    img_contours_before = cv2.cvtColor(original_mask, cv2.COLOR_GRAY2RGB)
+    for i, contour in enumerate(contours_before):
+        cv2.drawContours(img_contours_before, [contour], -1, (255, 0, 0), 2)
+        # 添加编号
+        M = cv2.moments(contour)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            cv2.putText(img_contours_before, str(i+1), (cx-10, cy+5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+    
+    axes[1, 0].imshow(img_contours_before)
+    axes[1, 0].set_title("分离前轮廓", fontsize=14, fontweight='bold')
+    axes[1, 0].axis('off')
+    
+    # 轮廓对比 - 分离后
+    contours_after, _ = cv2.findContours(processed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    img_contours_after = cv2.cvtColor(processed_mask, cv2.COLOR_GRAY2RGB)
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
+    
+    for i, contour in enumerate(contours_after):
+        color = colors[i % len(colors)]
+        cv2.drawContours(img_contours_after, [contour], -1, color, 2)
+        # 添加编号
+        M = cv2.moments(contour)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            cv2.putText(img_contours_after, str(i+1), (cx-10, cy+5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    
+    axes[1, 1].imshow(img_contours_after)
+    axes[1, 1].set_title("分离后轮廓", fontsize=14, fontweight='bold')
+    axes[1, 1].axis('off')
+    
+    # 统计信息图表
+    valid_before = len([c for c in contours_before if cv2.contourArea(c) > 100])
+    valid_after = len([c for c in contours_after if cv2.contourArea(c) > 100])
+    
+    areas_before = [cv2.contourArea(c) for c in contours_before if cv2.contourArea(c) > 100]
+    areas_after = [cv2.contourArea(c) for c in contours_after if cv2.contourArea(c) > 100]
+    
+    # 面积对比柱状图
+    axes[1, 2].bar(['分离前', '分离后'], [sum(areas_before), sum(areas_after)], 
+                   color=['red', 'green'], alpha=0.7)
+    axes[1, 2].set_title("总面积对比", fontsize=14, fontweight='bold')
+    axes[1, 2].set_ylabel("面积 (像素)")
+    
+    # 在图上添加数值
+    for i, v in enumerate([sum(areas_before), sum(areas_after)]):
+        axes[1, 2].text(i, v + max(areas_before + areas_after) * 0.02, f'{int(v)}', 
+                        ha='center', va='bottom', fontweight='bold')
+    
+    # 分离效果信息
+    improvement_ratio = valid_after / max(valid_before, 1)
+    separation_info = f'''分离性能报告:
+    ├─ 区域数量: {valid_before} → {valid_after}
+    ├─ 提升倍数: {improvement_ratio:.2f}x
+    ├─ 总面积: {sum(areas_before):.0f} → {sum(areas_after):.0f}
+    └─ 平均面积: {np.mean(areas_before):.0f} → {np.mean(areas_after):.0f}'''
+    
+    fig.suptitle(f'🚀 高性能分离效果对比\n{separation_info}', 
+                fontsize=16, fontweight='bold', y=0.02)
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.85)
+    plt.show()
+    
+    print(f"\n🎯 分离性能总结:")
+    print(f"   🔢 区域数量变化: {valid_before} → {valid_after}")
+    print(f"   📈 分离效果提升: {improvement_ratio:.2f}倍")
+    print(f"   📊 面积保持率: {sum(areas_after)/sum(areas_before)*100:.1f}%")
+
+def main():
+    """
+    高性能牙齿模板建立器主程序
+    """
+    print("🚀 启动高性能牙齿模板建立器")
+    print("=" * 50)
+    
+    # 自动生成连续编号，无需用户输入
+    tooth_id = None  # 将自动生成 TOOTH_001, TOOTH_002...
+    
+    # 图像路径
+    image_path = 'C:\\Users\\Administrator\\Desktop\\ya.png'
+    
+    # 检查文件是否存在
+    if not os.path.exists(image_path):
+        print(f"❌ 图像文件不存在: {image_path}")
+        print("💡 请检查文件路径是否正确")
+        return
+    
+    print(f"📸 正在处理图像: {image_path}")
+    
+    try:
+        # 启动高性能分离和模板建立（自动保存）
+        pick_color_and_draw_edge(image_path, tooth_id)
+        print("\n🎉 高性能处理完成！")
+        
+        # 演示如何加载和比对轮廓
+        print("\n" + "="*50)
+        print("📋 轮廓比对功能演示:")
+        
+        builder = ToothTemplateBuilder()
+        saved_templates = builder.list_all_saved_templates()
+        
+        if len(saved_templates) >= 2:
+            # 如果有至少2个模板，演示比对功能
+            template1 = saved_templates[0]
+            template2 = saved_templates[1]
+            
+            print(f"\n🔍 演示: 比对 {template1} 和 {template2}")
+            
+            # 加载第一个模板的轮廓
+            data1 = builder.load_saved_contours(template1)
+            if data1:
+                # 构造虚拟的当前轮廓（实际使用中这来自实时检测）
+                mock_current_contours = []
+                for contour_data in data1['contours'][:3]:  # 只取前3个作为示例
+                    mock_current_contours.append({
+                        'area': contour_data['area'],
+                        'length': contour_data['perimeter']
+                    })
+                
+                # 与第二个模板比对
+                comparison_result = builder.compare_with_saved_template(mock_current_contours, template2)
+                
+        elif len(saved_templates) == 1:
+            print(f"💡 已保存1个模板，需要至少2个模板才能演示比对功能")
+        else:
+            print(f"💡 暂无保存的模板，请先运行程序生成模板")
+            
+    except Exception as e:
+        print(f"❌ 处理过程中发生错误: {e}")
+        print("💡 请检查图像文件和依赖库是否正确安装")
 
 if __name__ == "__main__":
     main()
