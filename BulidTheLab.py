@@ -522,105 +522,57 @@ def pick_color_and_draw_edge(image_path, tooth_id=None):
 
 def ultra_separate_connected_objects(mask):
     """
-    超强黏连分离算法 - 专门针对牙齿模型优化，多策略并行
+    超强黏连分离算法 - 仅使用OpenCV，无需额外依赖
     """
-    print("🚀 启动超强分离算法...")
+    print("🚀 启动超强分离算法（OpenCV版本）...")
     
-    # 步骤1: 预处理
-    mask_bool = mask > 0
-    mask_clean = remove_small_objects(mask_bool, min_size=30, connectivity=2)
-    mask_clean = binary_opening(mask_clean, disk(1))
-    mask_clean = mask_clean.astype(np.uint8) * 255
+    # 步骤1: 清理噪声
+    kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask_clean = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_small)
     
-    # 步骤2: 距离变换
-    dist_transform = distance_transform_edt(mask_clean)
-    max_dist = np.max(dist_transform)
+    # 步骤2: 多策略分离尝试
+    best_result = mask_clean
+    max_components = 1
     
-    # 步骤3: 超激进参数
-    img_area = mask_clean.shape[0] * mask_clean.shape[1]
-    if img_area > 500000:
-        min_distance = max(int(max_dist * 0.08), 6)
-        threshold_abs = max_dist * 0.1
-        threshold_rel = 0.04
-    elif img_area > 100000:
-        min_distance = max(int(max_dist * 0.06), 4)
-        threshold_abs = max_dist * 0.08
-        threshold_rel = 0.03
-    else:
-        min_distance = max(int(max_dist * 0.05), 3)
-        threshold_abs = max_dist * 0.06
-        threshold_rel = 0.02
-    
-    print(f"💪 超激进参数 - 最小距离: {min_distance}, 阈值: {threshold_abs:.2f}")
-    
-    # 步骤4: 多轮种子点搜索
-    local_maxima = None
-    search_rounds = [
-        (min_distance, threshold_abs, threshold_rel),
-        (max(min_distance//2, 2), threshold_abs * 0.5, threshold_rel * 0.5),
-        (max(min_distance//3, 2), threshold_abs * 0.2, threshold_rel * 0.2),
-        (2, max_dist * 0.03, 0.01)  # 最后一轮极度激进
+    # 策略1: 激进腐蚀分离
+    erosion_configs = [
+        (1, 3), (2, 3), (3, 3), (4, 3),  # 小核多次迭代
+        (1, 5), (2, 5), (3, 5),          # 中核
+        (1, 7), (2, 7)                   # 大核
     ]
     
-    for round_idx, (md, ta, tr) in enumerate(search_rounds):
-        local_maxima = peak_local_max(
-            dist_transform,
-            min_distance=md,
-            threshold_abs=ta,
-            threshold_rel=tr,
-            exclude_border=False
-        )
-        print(f"🎯 第{round_idx+1}轮搜索: {len(local_maxima)} 个种子点")
+    for iterations, kernel_size in erosion_configs:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        eroded = cv2.erode(mask_clean, kernel, iterations=iterations)
         
-        if len(local_maxima) > 1:  # 找到多个种子点就停止
-            break
-    
-    if len(local_maxima) == 0:
-        print("❌ 分水岭失败，使用强制形态学分离")
-        return force_separation_with_morphology(mask_clean)
-    
-    # 步骤5: 创建标记，最小扩展
-    markers = np.zeros_like(mask_clean, dtype=np.int32)
-    for i, (y, x) in enumerate(local_maxima):
-        markers[y, x] = i + 1
-    
-    # 极小扩展，保持分离效果
-    expansion_size = max(1, min_distance // 8)
-    if expansion_size > 1:
-        markers = ndimage.binary_dilation(
-            markers > 0, 
-            structure=disk(expansion_size)
-        ).astype(np.int32)
-        markers = label(markers)
-    
-    # 步骤6: 分水岭分割
-    labels = watershed(-dist_transform, markers, mask=mask_clean)
-    
-    # 步骤7: 轻度后处理
-    result_mask = np.zeros_like(mask_clean)
-    regions = regionprops(labels)
-    
-    min_area = 30  # 极低面积要求
-    processed_regions = 0
-    
-    for region in regions:
-        if region.area < min_area:
-            continue
+        # 检查是否成功分离
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(eroded, connectivity=8)
+        
+        if num_labels > max_components:
+            max_components = num_labels
+            print(f"💪 找到更好分离: {num_labels-1} 个区域 (腐蚀{iterations}次,核{kernel_size}x{kernel_size})")
             
-        region_mask = (labels == region.label).astype(np.uint8) * 255
-        
-        # 极轻的闭运算
-        close_size = max(1, int(np.sqrt(region.area) * 0.01))
-        if close_size > 1:
-            kernel_close = disk(close_size)
-            region_mask = ndimage.binary_closing(region_mask, structure=kernel_close)
-            region_mask = region_mask.astype(np.uint8) * 255
-        
-        result_mask = cv2.bitwise_or(result_mask, region_mask)
-        processed_regions += 1
+            # 恢复各个区域
+            result_mask = np.zeros_like(mask_clean)
+            
+            for i in range(1, num_labels):  # 跳过背景
+                # 获取当前区域
+                component = (labels == i).astype(np.uint8) * 255
+                
+                # 渐进膨胀恢复
+                restore_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
+                                                         (min(kernel_size, 5), min(kernel_size, 5)))
+                restored = cv2.dilate(component, restore_kernel, iterations=min(iterations, 2))
+                
+                # 限制在原始区域内
+                restored = cv2.bitwise_and(restored, mask_clean)
+                
+                result_mask = cv2.bitwise_or(result_mask, restored)
+            
+            best_result = result_mask
     
-    print(f"✅ 超强分离完成！生成 {processed_regions} 个独立区域")
-    return result_mask
+    print(f"✅ 超强分离完成！最终分离出 {max_components-1} 个独立区域")
+    return best_result
 
 def force_separation_with_morphology(mask):
     """
@@ -887,7 +839,7 @@ def choose_separation_method(mask):
             return ultra_separate_connected_objects(mask)
         elif compactness < 0.3:
             print("� 使用高性能分水岭算法（非紧凑形状）...")
-            return separate_connected_objects(mask)
+            return ultra_separate_connected_objects(mask)
         else:
             print("⚡ 使用高速形态学方法（简单形状）...")
             return advanced_separate_connected_objects(mask)
@@ -1004,7 +956,7 @@ def main():
     tooth_id = None  # 将自动生成 TOOTH_001, TOOTH_002...
     
     # 图像路径
-    image_path = 'C:\\Users\\Administrator\\Desktop\\ya.png'
+    image_path = 'C:\\Users\\Administrator\\Desktop\\ya3.jpg'
     
     # 检查文件是否存在
     if not os.path.exists(image_path):
