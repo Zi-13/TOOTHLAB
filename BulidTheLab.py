@@ -15,6 +15,145 @@ from skimage.morphology import remove_small_objects, binary_opening, disk
 from skimage.measure import label, regionprops
 from scipy.ndimage import distance_transform_edt
 
+# === 1. 移植特征提取相关类 ===
+import logging
+from numpy.linalg import lstsq
+from sklearn.metrics.pairwise import cosine_similarity
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class FourierAnalyzer:
+    @staticmethod
+    def fit_fourier_series(data: np.ndarray, t: np.ndarray, order: int) -> np.ndarray:
+        try:
+            A = np.ones((len(t), 2 * order + 1))
+            for k in range(1, order + 1):
+                A[:, 2 * k - 1] = np.cos(k * t)
+                A[:, 2 * k] = np.sin(k * t)
+            coeffs, _, _, _ = lstsq(A, data, rcond=None)
+            return coeffs
+        except Exception as e:
+            logger.error(f"傅里叶级数拟合失败: {e}")
+            return np.zeros(2 * order + 1)
+
+    @staticmethod
+    def evaluate_fourier_series(coeffs: np.ndarray, t: np.ndarray, order: int) -> np.ndarray:
+        A = np.ones((len(t), 2 * order + 1))
+        for k in range(1, order + 1):
+            A[:, 2 * k - 1] = np.cos(k * t)
+            A[:, 2 * k] = np.sin(k * t)
+        return A @ coeffs
+
+    def analyze_contour(self, points: np.ndarray, order: int = 80, center_normalize: bool = True) -> dict:
+        try:
+            x = points[:, 0].astype(float)
+            y = points[:, 1].astype(float)
+            center_x = np.mean(x)
+            center_y = np.mean(y)
+            if center_normalize:
+                x_normalized = x - center_x
+                y_normalized = y - center_y
+                max_dist = np.max(np.sqrt(x_normalized**2 + y_normalized**2))
+                if max_dist > 0:
+                    x_normalized /= max_dist
+                    y_normalized /= max_dist
+            else:
+                x_normalized = x
+                y_normalized = y
+                max_dist = 1.0
+            N = len(points)
+            t = np.linspace(0, 2 * np.pi, N)
+            coeffs_x = self.fit_fourier_series(x_normalized, t, order)
+            coeffs_y = self.fit_fourier_series(y_normalized, t, order)
+            t_dense = np.linspace(0, 2 * np.pi, N * 4)
+            x_fit_normalized = self.evaluate_fourier_series(coeffs_x, t_dense, order)
+            y_fit_normalized = self.evaluate_fourier_series(coeffs_y, t_dense, order)
+            if center_normalize:
+                x_fit = x_fit_normalized * max_dist + center_x
+                y_fit = y_fit_normalized * max_dist + center_y
+            else:
+                x_fit = x_fit_normalized
+                y_fit = y_fit_normalized
+            return {
+                'coeffs_x': coeffs_x,
+                'coeffs_y': coeffs_y,
+                'center_x': center_x,
+                'center_y': center_y,
+                'max_dist': max_dist,
+                'order': order,
+                'x_fit': x_fit,
+                'y_fit': y_fit,
+                'original_points': (x, y)
+            }
+        except Exception as e:
+            logger.error(f"傅里叶分析失败: {e}")
+            return {}  # 修正：始终返回dict
+
+class ContourFeatureExtractor:
+    def __init__(self):
+        self.fourier_analyzer = FourierAnalyzer()
+
+    def extract_geometric_features(self, contour: np.ndarray) -> dict:
+        features = {}
+        area = cv2.contourArea(contour)
+        perimeter = cv2.arcLength(contour, True)
+        x, y, w, h = cv2.boundingRect(contour)
+        aspect_ratio = w / h if h != 0 else 0
+        circularity = (4 * np.pi * area) / (perimeter * perimeter) if perimeter != 0 else 0
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / hull_area if hull_area != 0 else 0
+        epsilon = 0.02 * perimeter
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        corner_count = len(approx)
+        features.update({
+            'area': area,
+            'perimeter': perimeter,
+            'aspect_ratio': aspect_ratio,
+            'circularity': circularity,
+            'solidity': solidity,
+            'corner_count': corner_count,
+            'bounding_rect': (x, y, w, h)
+        })
+        return features
+
+    def extract_hu_moments(self, contour: np.ndarray) -> np.ndarray:
+        try:
+            moments = cv2.moments(contour)
+            hu_moments = cv2.HuMoments(moments).flatten()
+            for i in range(len(hu_moments)):
+                if hu_moments[i] != 0:
+                    hu_moments[i] = -1 * np.copysign(1.0, hu_moments[i]) * np.log10(abs(hu_moments[i]))
+                else:
+                    hu_moments[i] = 0
+            return hu_moments
+        except Exception as e:
+            logger.error(f"Hu矩计算失败: {e}")
+            return np.zeros(7)
+
+    def extract_fourier_descriptors(self, points: np.ndarray) -> np.ndarray:
+        try:
+            fourier_data = self.fourier_analyzer.analyze_contour(points, center_normalize=True)
+            if fourier_data is not None:
+                coeffs_x = fourier_data['coeffs_x']
+                coeffs_y = fourier_data['coeffs_y']
+                fourier_features = np.concatenate([coeffs_x[:11], coeffs_y[:11]])
+                return fourier_features
+            else:
+                return np.zeros(22)
+        except Exception as e:
+            logger.error(f"傅里叶描述符提取失败: {e}")
+            return np.zeros(22)
+
+    def extract_all_features(self, contour: np.ndarray, points: np.ndarray) -> dict:
+        features = {}
+        geometric_features = self.extract_geometric_features(contour)
+        features.update(geometric_features)
+        features['hu_moments'] = self.extract_hu_moments(contour)
+        features['fourier_descriptors'] = self.extract_fourier_descriptors(points)
+        return features
+
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']  # 黑体
 matplotlib.rcParams['axes.unicode_minus'] = False
 
@@ -26,6 +165,8 @@ class ToothTemplateBuilder:
         (self.templates_dir / "contours").mkdir(exist_ok=True)
         (self.templates_dir / "images").mkdir(exist_ok=True)
         self.init_database()
+        self.feature_extractor = ContourFeatureExtractor()
+        self.current_image = None  # type: ignore  # 修正：允许动态类型
     
     def init_database(self):
         conn = sqlite3.connect(self.database_path)
@@ -92,16 +233,28 @@ class ToothTemplateBuilder:
             
             total_area = 0
             for i, contour_info in enumerate(valid_contours):
-                points = contour_info['points'].tolist()
-                x, y, w, h = cv2.boundingRect(contour_info['contour'])
-                
+                points = contour_info['points']
+                contour = contour_info['contour']
+                x, y, w, h = cv2.boundingRect(contour)
+                # === 新增：提取高级特征 ===
+                features = self.feature_extractor.extract_all_features(contour, points)
                 contour_data = {
                     "idx": i,
                     "original_idx": contour_info['idx'],
-                    "points": points,
+                    "points": points.tolist(),
                     "area": float(contour_info['area']),
                     "perimeter": float(contour_info['length']),
-                    "bounding_box": {"x": int(x), "y": int(y), "width": int(w), "height": int(h)}
+                    "bounding_box": {"x": int(x), "y": int(y), "width": int(w), "height": int(h)},
+                    "features": {
+                        "area": float(features['area']),
+                        "perimeter": float(features['perimeter']),
+                        "aspect_ratio": float(features['aspect_ratio']),
+                        "circularity": float(features['circularity']),
+                        "solidity": float(features['solidity']),
+                        "corner_count": int(features['corner_count']),
+                        "hu_moments": features['hu_moments'].tolist(),
+                        "fourier_descriptors": features['fourier_descriptors'].tolist()
+                    }
                 }
                 template_data["contours"].append(contour_data)
                 total_area += contour_info['area']
@@ -114,6 +267,16 @@ class ToothTemplateBuilder:
             
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(template_data, f, ensure_ascii=False, indent=2)
+
+            # === 新增：保存特征文件到 features 目录 ===
+            features_dir = self.templates_dir / "features"
+            features_dir.mkdir(exist_ok=True)
+            features_path = features_dir / f"{tooth_id}_features.json"
+            features_data = {
+                "features": [c["features"] for c in template_data["contours"]]
+            }
+            with open(features_path, 'w', encoding='utf-8') as f:
+                json.dump(features_data, f, ensure_ascii=False, indent=2)
             
             # 同时保存轮廓图像（PNG格式）
             png_filename = f"{tooth_id}.png"
@@ -342,7 +505,7 @@ def pick_color_and_draw_edge(image_path, tooth_id=None):
         tooth_id = builder.get_next_tooth_id()
     
     # 保存当前图像到builder中，用于PNG保存
-    builder.current_image = img
+    builder.current_image = img  # 修正：类型检查器允许
     
     # --- 交互式显示 ---
     fig, axes = plt.subplots(1, 3, figsize=(16, 6))
@@ -387,7 +550,8 @@ def pick_color_and_draw_edge(image_path, tooth_id=None):
         
         # 准备颜色列表
         colors_bgr = [(0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 255, 255), (255, 0, 255), (255, 255, 0)]
-        colors_plt = plt.cm.tab10(np.linspace(0, 1, max(len(valid_contours), 10)))
+        cmap = plt.get_cmap('tab10')
+        colors_plt = cmap(np.linspace(0, 1, max(len(valid_contours), 10)))
         
         for j, info in enumerate(valid_contours):
             contour = info['contour']
@@ -675,7 +839,7 @@ def force_separation_with_morphology(mask):
             threshold_abs=threshold_abs * 0.5,
             threshold_rel=threshold_rel * 0.5
         )
-        print(f"� 重试后检测到 {len(local_maxima)} 个种子点")
+        print(f"🔄 重试后检测到 {len(local_maxima)} 个种子点")
     
     if len(local_maxima) == 0:
         print("❌ 仍未找到分离点，使用备选方案")
@@ -838,7 +1002,7 @@ def choose_separation_method(mask):
             print("🚀 使用超强分离算法（复杂形状）...")
             return ultra_separate_connected_objects(mask)
         elif compactness < 0.3:
-            print("� 使用高性能分水岭算法（非紧凑形状）...")
+            print("🚀 使用超强分离算法（非紧凑形状）...")
             return ultra_separate_connected_objects(mask)
         else:
             print("⚡ 使用高速形态学方法（简单形状）...")
@@ -956,7 +1120,7 @@ def main():
     tooth_id = None  # 将自动生成 TOOTH_001, TOOTH_002...
     
     # 图像路径
-    image_path = '你的路径'
+    image_path = 'C:\\Users\\Jason\\Desktop\\true.png' 
     
     # 检查文件是否存在
     if not os.path.exists(image_path):
@@ -970,40 +1134,6 @@ def main():
         # 启动高性能分离和模板建立（自动保存）
         pick_color_and_draw_edge(image_path, tooth_id)
         print("\n🎉 高性能处理完成！")
-        
-        # 演示如何加载和比对轮廓
-        print("\n" + "="*50)
-        print("📋 轮廓比对功能演示:")
-        
-        builder = ToothTemplateBuilder()
-        saved_templates = builder.list_all_saved_templates()
-        
-        if len(saved_templates) >= 2:
-            # 如果有至少2个模板，演示比对功能
-            template1 = saved_templates[0]
-            template2 = saved_templates[1]
-            
-            print(f"\n🔍 演示: 比对 {template1} 和 {template2}")
-            
-            # 加载第一个模板的轮廓
-            data1 = builder.load_saved_contours(template1)
-            if data1:
-                # 构造虚拟的当前轮廓（实际使用中这来自实时检测）
-                mock_current_contours = []
-                for contour_data in data1['contours'][:3]:  # 只取前3个作为示例
-                    mock_current_contours.append({
-                        'area': contour_data['area'],
-                        'length': contour_data['perimeter']
-                    })
-                
-                # 与第二个模板比对
-                comparison_result = builder.compare_with_saved_template(mock_current_contours, template2)
-                
-        elif len(saved_templates) == 1:
-            print(f"💡 已保存1个模板，需要至少2个模板才能演示比对功能")
-        else:
-            print(f"💡 暂无保存的模板，请先运行程序生成模板")
-            
     except Exception as e:
         print(f"❌ 处理过程中发生错误: {e}")
         print("💡 请检查图像文件和依赖库是否正确安装")
