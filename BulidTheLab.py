@@ -956,7 +956,7 @@ def main():
     tooth_id = None  # 将自动生成 TOOTH_001, TOOTH_002...
     
     # 图像路径
-    image_path = 'C:\\Users\\Administrator\\Desktop\\ya3.jpg'
+    image_path = '你的路径'
     
     # 检查文件是否存在
     if not os.path.exists(image_path):
