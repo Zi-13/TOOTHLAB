@@ -15,6 +15,144 @@ from skimage.morphology import remove_small_objects, binary_opening, disk
 from skimage.measure import label, regionprops
 from scipy.ndimage import distance_transform_edt
 
+# ========== 移植特征提取相关类 ==========
+import logging
+from numpy.linalg import lstsq
+from sklearn.metrics.pairwise import cosine_similarity
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+class FourierAnalyzer:
+    """傅里叶级数分析器"""
+    @staticmethod
+    def fit_fourier_series(data: np.ndarray, t: np.ndarray, order: int) -> np.ndarray:
+        try:
+            A = np.ones((len(t), 2 * order + 1))
+            for k in range(1, order + 1):
+                A[:, 2 * k - 1] = np.cos(k * t)
+                A[:, 2 * k] = np.sin(k * t)
+            coeffs, _, _, _ = lstsq(A, data, rcond=None)
+            return coeffs
+        except Exception as e:
+            logger.error(f"傅里叶级数拟合失败: {e}")
+            return np.zeros(2 * order + 1)
+
+    @staticmethod
+    def evaluate_fourier_series(coeffs: np.ndarray, t: np.ndarray, order: int) -> np.ndarray:
+        A = np.ones((len(t), 2 * order + 1))
+        for k in range(1, order + 1):
+            A[:, 2 * k - 1] = np.cos(k * t)
+            A[:, 2 * k] = np.sin(k * t)
+        return A @ coeffs
+
+    def analyze_contour(self, points: np.ndarray, order: int = 80, center_normalize: bool = True) -> dict:
+        try:
+            x = points[:, 0].astype(float)
+            y = points[:, 1].astype(float)
+            center_x = np.mean(x)
+            center_y = np.mean(y)
+            if center_normalize:
+                x_normalized = x - center_x
+                y_normalized = y - center_y
+                max_dist = np.max(np.sqrt(x_normalized**2 + y_normalized**2))
+                if max_dist > 0:
+                    x_normalized /= max_dist
+                    y_normalized /= max_dist
+            else:
+                x_normalized = x
+                y_normalized = y
+                max_dist = 1.0
+            N = len(points)
+            t = np.linspace(0, 2 * np.pi, N)
+            coeffs_x = self.fit_fourier_series(x_normalized, t, order)
+            coeffs_y = self.fit_fourier_series(y_normalized, t, order)
+            t_dense = np.linspace(0, 2 * np.pi, N * 4)
+            x_fit_normalized = self.evaluate_fourier_series(coeffs_x, t_dense, order)
+            y_fit_normalized = self.evaluate_fourier_series(coeffs_y, t_dense, order)
+            if center_normalize:
+                x_fit = x_fit_normalized * max_dist + center_x
+                y_fit = y_fit_normalized * max_dist + center_y
+            else:
+                x_fit = x_fit_normalized
+                y_fit = y_fit_normalized
+            return {
+                'coeffs_x': coeffs_x,
+                'coeffs_y': coeffs_y,
+                'center_x': center_x,
+                'center_y': center_y,
+                'max_dist': max_dist,
+                'order': order,
+                'x_fit': x_fit,
+                'y_fit': y_fit,
+                'original_points': (x, y)
+            }
+        except Exception as e:
+            logger.error(f"傅里叶分析失败: {e}")
+            return None
+
+class ContourFeatureExtractor:
+    """轮廓特征提取器"""
+    def __init__(self):
+        self.fourier_analyzer = FourierAnalyzer()
+    def extract_geometric_features(self, contour: np.ndarray) -> dict:
+        features = {}
+        area = cv2.contourArea(contour)
+        perimeter = cv2.arcLength(contour, True)
+        x, y, w, h = cv2.boundingRect(contour)
+        aspect_ratio = w / h if h != 0 else 0
+        circularity = (4 * np.pi * area) / (perimeter * perimeter) if perimeter != 0 else 0
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / hull_area if hull_area != 0 else 0
+        epsilon = 0.02 * perimeter
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        corner_count = len(approx)
+        features.update({
+            'area': area,
+            'perimeter': perimeter,
+            'aspect_ratio': aspect_ratio,
+            'circularity': circularity,
+            'solidity': solidity,
+            'corner_count': corner_count,
+            'bounding_rect': (x, y, w, h)
+        })
+        return features
+    def extract_hu_moments(self, contour: np.ndarray) -> np.ndarray:
+        try:
+            moments = cv2.moments(contour)
+            hu_moments = cv2.HuMoments(moments).flatten()
+            for i in range(len(hu_moments)):
+                if hu_moments[i] != 0:
+                    hu_moments[i] = -1 * np.copysign(1.0, hu_moments[i]) * np.log10(abs(hu_moments[i]))
+                else:
+                    hu_moments[i] = 0
+            return hu_moments
+        except Exception as e:
+            logger.error(f"Hu矩计算失败: {e}")
+            return np.zeros(7)
+    def extract_fourier_descriptors(self, points: np.ndarray) -> np.ndarray:
+        try:
+            fourier_data = self.fourier_analyzer.analyze_contour(points, center_normalize=True)
+            if fourier_data is not None:
+                coeffs_x = fourier_data['coeffs_x']
+                coeffs_y = fourier_data['coeffs_y']
+                fourier_features = np.concatenate([coeffs_x[:11], coeffs_y[:11]])
+                return fourier_features
+            else:
+                return np.zeros(22)
+        except Exception as e:
+            logger.error(f"傅里叶描述符提取失败: {e}")
+            return np.zeros(22)
+    def extract_all_features(self, contour: np.ndarray, points: np.ndarray) -> dict:
+        features = {}
+        geometric_features = self.extract_geometric_features(contour)
+        features.update(geometric_features)
+        features['hu_moments'] = self.extract_hu_moments(contour)
+        features['fourier_descriptors'] = self.extract_fourier_descriptors(points)
+        return features
+# ========== END 特征提取相关类 ==========
+
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']  # 黑体
 matplotlib.rcParams['axes.unicode_minus'] = False
 
@@ -91,17 +229,30 @@ class ToothTemplateBuilder:
             }
             
             total_area = 0
+            feature_extractor = ContourFeatureExtractor()  # 新增
             for i, contour_info in enumerate(valid_contours):
-                points = contour_info['points'].tolist()
-                x, y, w, h = cv2.boundingRect(contour_info['contour'])
-                
+                points = contour_info['points']
+                contour = contour_info['contour']
+                x, y, w, h = cv2.boundingRect(contour)
+                # 提取特征
+                features = feature_extractor.extract_all_features(contour, points)
                 contour_data = {
                     "idx": i,
                     "original_idx": contour_info['idx'],
-                    "points": points,
+                    "points": points.tolist(),
                     "area": float(contour_info['area']),
                     "perimeter": float(contour_info['length']),
-                    "bounding_box": {"x": int(x), "y": int(y), "width": int(w), "height": int(h)}
+                    "bounding_box": {"x": int(x), "y": int(y), "width": int(w), "height": int(h)},
+                    "features": {
+                        "area": float(features['area']),
+                        "perimeter": float(features['perimeter']),
+                        "aspect_ratio": float(features['aspect_ratio']),
+                        "circularity": float(features['circularity']),
+                        "solidity": float(features['solidity']),
+                        "corner_count": int(features['corner_count']),
+                        "hu_moments": features['hu_moments'].tolist(),
+                        "fourier_descriptors": features['fourier_descriptors'].tolist()
+                    }
                 }
                 template_data["contours"].append(contour_data)
                 total_area += contour_info['area']
@@ -838,7 +989,7 @@ def choose_separation_method(mask):
             print("🚀 使用超强分离算法（复杂形状）...")
             return ultra_separate_connected_objects(mask)
         elif compactness < 0.3:
-            print("� 使用高性能分水岭算法（非紧凑形状）...")
+            print("🚀 使用超强分离算法（复杂形状）...")
             return ultra_separate_connected_objects(mask)
         else:
             print("⚡ 使用高速形态学方法（简单形状）...")
