@@ -22,7 +22,7 @@ plt.rcParams['font.size'] = 10
 
 # 配置常量
 class Config:
-    INPUT_VIDEO = 'c:\\Users\\Jason\\Desktop\\0717_1.DNG'
+    INPUT_VIDEO = 'c:\\Users\\Jason\\Desktop\\test.jpg'
     DEFAULT_HSV_TOLERANCE = {'h': 15, 's': 60, 'v': 60}
     FOURIER_ORDER = 80
     MIN_CONTOUR_POINTS = 20
@@ -117,7 +117,7 @@ class FourierAnalyzer:
             
         except Exception as e:
             logger.error(f"傅里叶分析失败: {e}")
-            return None
+            return {}
 
 class ContourFeatureExtractor:
     """轮廓特征提取器"""
@@ -209,6 +209,11 @@ class ContourFeatureExtractor:
         
         # TODO 傅里叶描述符
         features['fourier_descriptors'] = self.extract_fourier_descriptors(points)
+        
+        fourier_data = self.fourier_analyzer.analyze_contour(points, center_normalize=True)
+        if fourier_data is not None:
+            features['fourier_x_fit'] = fourier_data['x_fit'].tolist()
+            features['fourier_y_fit'] = fourier_data['y_fit'].tolist()
         
         return features
 
@@ -643,18 +648,23 @@ class ToothMatcher:
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         valid_contours = []
         all_features = []
-        
+        areas = [cv2.contourArea(c) for c in contours]
+        if areas:
+            max_area = max(areas)
+            min_area = min(areas)
+            # 如果最大最小面积相差100倍以上，过滤掉小于max_area/100的轮廓
+            if max_area > 0 and max_area / max(min_area, 1e-6) > 100:
+                area_threshold = max_area / 100
+                filtered = [(i, c) for i, c in enumerate(contours) if cv2.contourArea(c) >= area_threshold]
+                contours = [c for i, c in filtered]
         for i, contour in enumerate(contours):
             if contour.shape[0] < Config.MIN_CONTOUR_POINTS:
                 continue
-            
             area = cv2.contourArea(contour)
             length = cv2.arcLength(contour, True)
             points = contour[:, 0, :]
-            
             # TODO 提取特征
             features = self.feature_extractor.extract_all_features(contour, points)
-            
             valid_contours.append({
                 'contour': contour,
                 'points': points,
@@ -664,7 +674,6 @@ class ToothMatcher:
                 'features': features
             })
             all_features.append(features)
-        
         return valid_contours, all_features
     
     def _show_interactive_display(self, color_extract: np.ndarray, 
@@ -700,15 +709,15 @@ class ToothMatcher:
         
         # 初始化数据库匹配信息
         if self.templates:
-            ax_db_matches.set_title("数据库匹配结果")
-            ax_db_matches.axis('off')
-            
-            ax_stats.set_title("模板库统计")
-            ax_stats.axis('off')
-            
-            ax_history.set_title("匹配历史")
-            ax_history.axis('off')
-            
+            if ax_db_matches is not None:
+                ax_db_matches.set_title("数据库匹配结果")
+                ax_db_matches.axis('off')
+            if ax_stats is not None:
+                ax_stats.set_title("模板库统计")
+                ax_stats.axis('off')
+            if ax_history is not None:
+                ax_history.set_title("匹配历史")
+                ax_history.axis('off')
             # 显示模板库统计
             total_templates = len(self.templates)
             total_contours = sum(len(t['features']) for t in self.templates.values())
@@ -718,9 +727,9 @@ class ToothMatcher:
                 stats_text += f"{i+1}. {template_id} ({data['num_contours']}个轮廓)\n"
             if total_templates > 10:
                 stats_text += f"... 还有 {total_templates-10} 个模板"
-            
-            ax_stats.text(0.05, 0.95, stats_text, transform=ax_stats.transAxes, 
-                         fontsize=10, verticalalignment='top', fontfamily='monospace')
+            if ax_stats is not None:
+                ax_stats.text(0.05, 0.95, stats_text, transform=ax_stats.transAxes, 
+                             fontsize=10, verticalalignment='top', fontfamily='monospace')
         
         selected_idx = [0]
         
@@ -765,7 +774,8 @@ class ToothMatcher:
         ax_fit.invert_yaxis()
         ax_fit.grid(True)
         
-        colors = plt.cm.tab10(np.linspace(0, 1, max(len(valid_contours), 10)))
+        cmap = plt.get_cmap('tab10')
+        colors = cmap(np.linspace(0, 1, max(len(valid_contours), 10)))
         
         # 找到相似轮廓（当前图像内部）
         similar_contours = []
@@ -844,7 +854,7 @@ class ToothMatcher:
         ax_fit.text(0.02, -0.25, feature_info, transform=ax_fit.transAxes, 
                    fontsize=8, color='red', va='top', ha='left')
         
-        # 更新放大视图
+        # 更新放大
         self._update_zoom_view(ax_zoom, info, highlight_idx)
         
         # 更新数据库匹配视图
@@ -915,7 +925,37 @@ class ToothMatcher:
             ax_db_matches.text(0.05, 0.95, match_text, transform=ax_db_matches.transAxes, 
                               fontsize=9, verticalalignment='top', fontfamily='monospace')
 
-    # ...existing methods (_pick_colors, _create_mask, _process_contours, _update_zoom_view)...
+    def _update_zoom_view(self, ax_zoom, info, highlight_idx):
+        features = info['features']  # ← 这行是关键
+        ax_zoom.clear()
+        contour = info['contour']
+        x, y, w, h = cv2.boundingRect(contour)
+        margin = max(20, int(0.1 * max(w, h)))
+        x1 = max(0, x - margin)
+        y1 = max(0, y - margin)
+        x2 = x + w + margin
+        y2 = y + h + margin
+
+        # 假设info里有原始图像（如info['image']），否则只能画轮廓
+        if 'image' in info:
+            img = info['image']
+            crop = img[y1:y2, x1:x2].copy()
+            adjusted_contour = contour.copy()
+            adjusted_contour[:, 0, 0] -= x1
+            adjusted_contour[:, 0, 1] -= y1
+            cv2.drawContours(crop, [adjusted_contour], -1, (0, 0, 255), 2)
+            ax_zoom.imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        else:
+            # 只画轮廓
+            points = info['points']
+            ax_zoom.plot(points[:, 0], points[:, 1], 'r-')
+            ax_zoom.fill(points[:, 0], points[:, 1], alpha=0.3)
+            ax_zoom.set_aspect('equal')
+        ax_zoom.set_title(f'色块放大视图 {info["idx"]+1}')
+        ax_zoom.axis('off')
+
+        if 'fourier_x_fit' in features and 'fourier_y_fit' in features:
+            ax_zoom.plot(features['fourier_x_fit'], features['fourier_y_fit'], 'g--', linewidth=2, label='傅里叶平滑')
 
 def main():
     """主函数"""
