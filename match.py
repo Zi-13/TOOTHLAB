@@ -20,6 +20,8 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu S
 matplotlib.rcParams['axes.unicode_minus'] = False
 plt.rcParams['font.size'] = 10
 
+#TODO 修改图片路径
+PHOTO_PATH = r'c:\Users\Jason\Desktop\tooth\test.png'
 # 配置常量
 class Config:
     INPUT_VIDEO = 'c:\\Users\\Jason\\Desktop\\test.jpg'
@@ -30,7 +32,7 @@ class Config:
     SIZE_TOLERANCE = 0.3
     DATABASE_PATH = "tooth_templates.db"
     TEMPLATES_DIR = "templates"
-
+  
 class FourierAnalyzer:
     """傅里叶级数分析器"""
     
@@ -125,41 +127,38 @@ class ContourFeatureExtractor:
     def __init__(self):
         self.fourier_analyzer = FourierAnalyzer()
     
-    def extract_geometric_features(self, contour: np.ndarray) -> dict:
-        """提取几何特征"""
+    def extract_geometric_features(self, contour: np.ndarray, image_shape=None) -> dict:
         features = {}
-        
-        # TODO 基本几何特征
         area = cv2.contourArea(contour)
         perimeter = cv2.arcLength(contour, True)
-        
-        # TODO 边界矩形
-        x, y, w, h = cv2.boundingRect(contour)
-        aspect_ratio = w / h if h != 0 else 0
-        
-        # TODO 圆形度
+        if image_shape is not None:
+            h, w = image_shape[:2]
+            diag = (h**2 + w**2) ** 0.5
+            area_norm = area / (diag ** 2)
+            perimeter_norm = perimeter / diag
+        else:
+            area_norm = area
+            perimeter_norm = perimeter
+        x, y, w_box, h_box = cv2.boundingRect(contour)
+        aspect_ratio = w_box / h_box if h_box != 0 else 0
         circularity = (4 * np.pi * area) / (perimeter * perimeter) if perimeter != 0 else 0
-        
-        # TODO 凸包特征
         hull = cv2.convexHull(contour)
         hull_area = cv2.contourArea(hull)
         solidity = area / hull_area if hull_area != 0 else 0
-        
-        # TODO 轮廓角点特征
         epsilon = 0.02 * perimeter
         approx = cv2.approxPolyDP(contour, epsilon, True)
         corner_count = len(approx)
-        
         features.update({
             'area': area,
             'perimeter': perimeter,
+            'area_norm': area_norm,
+            'perimeter_norm': perimeter_norm,
             'aspect_ratio': aspect_ratio,
             'circularity': circularity,
             'solidity': solidity,
             'corner_count': corner_count,
-            'bounding_rect': (x, y, w, h)
+            'bounding_rect': (x, y, w_box, h_box)
         })
-        
         return features
     
     def extract_hu_moments(self, contour: np.ndarray) -> np.ndarray:
@@ -196,25 +195,16 @@ class ContourFeatureExtractor:
             logger.error(f"傅里叶描述符提取失败: {e}")
             return np.zeros(22)
     
-    def extract_all_features(self, contour: np.ndarray, points: np.ndarray) -> dict:
-        """提取所有特征"""
+    def extract_all_features(self, contour: np.ndarray, points: np.ndarray, image_shape=None) -> dict:
         features = {}
-        
-        # TODO 几何特征
-        geometric_features = self.extract_geometric_features(contour)
+        geometric_features = self.extract_geometric_features(contour, image_shape=image_shape)
         features.update(geometric_features)
-        
-        # TODO Hu矩特征
         features['hu_moments'] = self.extract_hu_moments(contour)
-        
-        # TODO 傅里叶描述符
         features['fourier_descriptors'] = self.extract_fourier_descriptors(points)
-        
         fourier_data = self.fourier_analyzer.analyze_contour(points, center_normalize=True)
         if fourier_data is not None:
             features['fourier_x_fit'] = fourier_data['x_fit'].tolist()
             features['fourier_y_fit'] = fourier_data['y_fit'].tolist()
-        
         return features
 
 class SimilarityCalculator:
@@ -222,10 +212,11 @@ class SimilarityCalculator:
     
     @staticmethod
     def calculate_size_similarity(features1: dict, features2: dict) -> float:
-        """计算尺寸相似度"""
-        area1, area2 = features1['area'], features2['area']
-        perimeter1, perimeter2 = features1['perimeter'], features2['perimeter']
-        
+        """计算尺寸相似度（优先用归一化特征）"""
+        area1 = features1.get('area_norm', features1.get('area', 0))
+        area2 = features2.get('area_norm', features2.get('area', 0))
+        perimeter1 = features1.get('perimeter_norm', features1.get('perimeter', 0))
+        perimeter2 = features2.get('perimeter_norm', features2.get('perimeter', 0))
         # TODO 计算面积相似度
         if area1 == 0 and area2 == 0:
             area_sim = 1.0
@@ -234,7 +225,6 @@ class SimilarityCalculator:
         else:
             area_ratio = min(area1, area2) / max(area1, area2)
             area_sim = area_ratio
-        
         # TODO 计算周长相似度
         if perimeter1 == 0 and perimeter2 == 0:
             perimeter_sim = 1.0
@@ -243,7 +233,6 @@ class SimilarityCalculator:
         else:
             perimeter_ratio = min(perimeter1, perimeter2) / max(perimeter1, perimeter2)
             perimeter_sim = perimeter_ratio
-        
         return 0.3*area_sim + 0.7*perimeter_sim
     
     @staticmethod
@@ -644,7 +633,6 @@ class ToothMatcher:
         return cv2.inRange(hsv, lower, upper)
     
     def _process_contours(self, mask: np.ndarray) -> tuple:
-        """处理轮廓"""
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         valid_contours = []
         all_features = []
@@ -652,19 +640,23 @@ class ToothMatcher:
         if areas:
             max_area = max(areas)
             min_area = min(areas)
-            # 如果最大最小面积相差100倍以上，过滤掉小于max_area/100的轮廓
             if max_area > 0 and max_area / max(min_area, 1e-6) > 100:
                 area_threshold = max_area / 100
                 filtered = [(i, c) for i, c in enumerate(contours) if cv2.contourArea(c) >= area_threshold]
                 contours = [c for i, c in filtered]
+        # 获取图像shape
+        image_shape = None
+        if hasattr(self, 'current_image_path') and self.current_image_path is not None:
+            img = cv2.imread(self.current_image_path)
+            if img is not None:
+                image_shape = img.shape
         for i, contour in enumerate(contours):
             if contour.shape[0] < Config.MIN_CONTOUR_POINTS:
                 continue
             area = cv2.contourArea(contour)
             length = cv2.arcLength(contour, True)
             points = contour[:, 0, :]
-            # TODO 提取特征
-            features = self.feature_extractor.extract_all_features(contour, points)
+            features = self.feature_extractor.extract_all_features(contour, points, image_shape=image_shape)
             valid_contours.append({
                 'contour': contour,
                 'points': points,
@@ -957,6 +949,8 @@ class ToothMatcher:
         if 'fourier_x_fit' in features and 'fourier_y_fit' in features:
             ax_zoom.plot(features['fourier_x_fit'], features['fourier_y_fit'], 'g--', linewidth=2, label='傅里叶平滑')
 
+
+
 def main():
     """主函数"""
     print("🦷 牙齿匹配系统")
@@ -965,9 +959,9 @@ def main():
     
     choice = input("请选择模式 (1/2, 默认2): ").strip()
     
-    image_path = input(f"请输入图片路径 (默认: {Config.INPUT_VIDEO}): ").strip()
+    image_path = input(f"请输入图片路径 (默认: {PHOTO_PATH}): ").strip()
     if not image_path:
-        image_path = Config.INPUT_VIDEO
+        image_path = PHOTO_PATH
     
     try:
         matcher = ToothMatcher()
