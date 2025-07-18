@@ -23,6 +23,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+PHOTO_PATH = r'C:\Users\Jason\Desktop\tooth\Tooth_6.png'
+
 class FourierAnalyzer:
     @staticmethod
     def fit_fourier_series(data: np.ndarray, t: np.ndarray, order: int) -> np.ndarray:
@@ -94,12 +96,20 @@ class ContourFeatureExtractor:
     def __init__(self):
         self.fourier_analyzer = FourierAnalyzer()
 
-    def extract_geometric_features(self, contour: np.ndarray) -> dict:
+    def extract_geometric_features(self, contour: np.ndarray, image_shape=None) -> dict:
         features = {}
         area = cv2.contourArea(contour)
         perimeter = cv2.arcLength(contour, True)
-        x, y, w, h = cv2.boundingRect(contour)
-        aspect_ratio = w / h if h != 0 else 0
+        if image_shape is not None:
+            h, w = image_shape[:2]
+            diag = (h**2 + w**2) ** 0.5
+            area_norm = area / (diag ** 2)
+            perimeter_norm = perimeter / diag
+        else:
+            area_norm = area
+            perimeter_norm = perimeter
+        x, y, w_box, h_box = cv2.boundingRect(contour)
+        aspect_ratio = w_box / h_box if h_box != 0 else 0
         circularity = (4 * np.pi * area) / (perimeter * perimeter) if perimeter != 0 else 0
         hull = cv2.convexHull(contour)
         hull_area = cv2.contourArea(hull)
@@ -110,11 +120,13 @@ class ContourFeatureExtractor:
         features.update({
             'area': area,
             'perimeter': perimeter,
+            'area_norm': area_norm,
+            'perimeter_norm': perimeter_norm,
             'aspect_ratio': aspect_ratio,
             'circularity': circularity,
             'solidity': solidity,
             'corner_count': corner_count,
-            'bounding_rect': (x, y, w, h)
+            'bounding_rect': (x, y, w_box, h_box)
         })
         return features
 
@@ -146,12 +158,16 @@ class ContourFeatureExtractor:
             logger.error(f"傅里叶描述符提取失败: {e}")
             return np.zeros(22)
 
-    def extract_all_features(self, contour: np.ndarray, points: np.ndarray) -> dict:
+    def extract_all_features(self, contour: np.ndarray, points: np.ndarray, image_shape=None) -> dict:
         features = {}
-        geometric_features = self.extract_geometric_features(contour)
+        geometric_features = self.extract_geometric_features(contour, image_shape=image_shape)
         features.update(geometric_features)
         features['hu_moments'] = self.extract_hu_moments(contour)
         features['fourier_descriptors'] = self.extract_fourier_descriptors(points)
+        fourier_data = self.fourier_analyzer.analyze_contour(points, center_normalize=True)
+        if fourier_data is not None:
+            features['fourier_x_fit'] = fourier_data['x_fit'].tolist()
+            features['fourier_y_fit'] = fourier_data['y_fit'].tolist()
         return features
 
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']  # 黑体
@@ -237,7 +253,7 @@ class ToothTemplateBuilder:
                 contour = contour_info['contour']
                 x, y, w, h = cv2.boundingRect(contour)
                 # === 新增：提取高级特征 ===
-                features = self.feature_extractor.extract_all_features(contour, points)
+                features = self.feature_extractor.extract_all_features(contour, points, image_shape=self.current_image.shape if hasattr(self, 'current_image') and self.current_image is not None else None)
                 contour_data = {
                     "idx": i,
                     "original_idx": contour_info['idx'],
@@ -248,6 +264,8 @@ class ToothTemplateBuilder:
                     "features": {
                         "area": float(features['area']),
                         "perimeter": float(features['perimeter']),
+                        "area_norm": float(features['area_norm']),
+                        "perimeter_norm": float(features['perimeter_norm']),
                         "aspect_ratio": float(features['aspect_ratio']),
                         "circularity": float(features['circularity']),
                         "solidity": float(features['solidity']),
@@ -804,17 +822,17 @@ def force_separation_with_morphology(mask):
     
     # 更激进的参数，强制分离黏连牙齿
     if img_area > 500000:  # 大图像
-        min_distance = max(int(max_dist * 0.15), 8)  # 降低最小距离
-        threshold_abs = max_dist * 0.2  # 大幅降低阈值
-        threshold_rel = 0.08
+        min_distance = 2  # 极小
+        threshold_abs = max_dist * 0.05  # 更低
+        threshold_rel = 0.02
     elif img_area > 100000:  # 中等图像
-        min_distance = max(int(max_dist * 0.12), 6)
-        threshold_abs = max_dist * 0.15
-        threshold_rel = 0.06
+        min_distance = 1
+        threshold_abs = max_dist * 0.03
+        threshold_rel = 0.01
     else:  # 小图像
-        min_distance = max(int(max_dist * 0.1), 4)
-        threshold_abs = max_dist * 0.1
-        threshold_rel = 0.05
+        min_distance = 1
+        threshold_abs = max_dist * 0.01
+        threshold_rel = 0.005
     
     print(f"🔍 距离变换最大值: {max_dist:.2f}")
     print(f"📊 参数设置 - 最小距离: {min_distance}, 阈值: {threshold_abs:.2f}")
@@ -1109,6 +1127,8 @@ def show_separation_comparison(original_mask, processed_mask, image_path):
     print(f"   📈 分离效果提升: {improvement_ratio:.2f}倍")
     print(f"   📊 面积保持率: {sum(areas_after)/sum(areas_before)*100:.1f}%")
 
+
+
 def main():
     """
     高性能牙齿模板建立器主程序
@@ -1120,7 +1140,7 @@ def main():
     tooth_id = None  # 将自动生成 TOOTH_001, TOOTH_002...
     
     # 图像路径
-    image_path = 'C:\\Users\\Jason\\Desktop\\true.png' 
+    image_path = PHOTO_PATH 
     
     # 检查文件是否存在
     if not os.path.exists(image_path):
