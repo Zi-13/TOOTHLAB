@@ -270,8 +270,8 @@ class ToothTemplateBuilder:
                         "circularity": float(features['circularity']),
                         "solidity": float(features['solidity']),
                         "corner_count": int(features['corner_count']),
-                        "hu_moments": features['hu_moments'].tolist(),
-                        "fourier_descriptors": features['fourier_descriptors'].tolist()
+                        "hu_moments": features['hu_moments'].tolist() if hasattr(features['hu_moments'], 'tolist') else list(features['hu_moments']) if features['hu_moments'] is not None else [],
+                        "fourier_descriptors": features['fourier_descriptors'].tolist() if hasattr(features['fourier_descriptors'], 'tolist') else list(features['fourier_descriptors']) if features['fourier_descriptors'] is not None else []
                     }
                 }
                 template_data["contours"].append(contour_data)
@@ -1157,7 +1157,15 @@ def save_features_only(valid_contours, tooth_id, features_dir="templates/feature
     from pathlib import Path
     features_dir = Path(features_dir)
     features_dir.mkdir(parents=True, exist_ok=True)
-    features_list = [contour['features'] for contour in valid_contours]
+    features_list = []
+    for contour in valid_contours:
+        features = contour['features'].copy()
+        for key, value in features.items():
+            if hasattr(value, 'tolist'):
+                features[key] = value.tolist()
+            elif isinstance(value, (list, tuple)) and len(value) > 0 and hasattr(value[0], 'tolist'):
+                features[key] = [v.tolist() if hasattr(v, 'tolist') else v for v in value]
+        features_list.append(features)
     features_path = features_dir / f"{tooth_id}_features.json"
     with open(features_path, 'w', encoding='utf-8') as f:
         json.dump({"features": features_list}, f, ensure_ascii=False, indent=2)

@@ -206,6 +206,7 @@ class ContourFeatureExtractor:
         if fourier_data is not None:
             features['fourier_x_fit'] = fourier_data['x_fit'].tolist()
             features['fourier_y_fit'] = fourier_data['y_fit'].tolist()
+        return features
     
     def extract_all_contours(self, contour: np.ndarray, points: np.ndarray, image_shape=None) -> dict:
         return self.extract_all_features(contour, points, image_shape)
