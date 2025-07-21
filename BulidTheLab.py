@@ -23,7 +23,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-PHOTO_PATH = r'C:\Users\Jason\Desktop\tooth\Tooth_6.png'
+PHOTO_PATH = r'c:\Users\Jason\Desktop\tooth\Tooth_5.png'
 
 class FourierAnalyzer:
     @staticmethod
@@ -287,14 +287,7 @@ class ToothTemplateBuilder:
                 json.dump(template_data, f, ensure_ascii=False, indent=2)
 
             # === 新增：保存特征文件到 features 目录 ===
-            features_dir = self.templates_dir / "features"
-            features_dir.mkdir(exist_ok=True)
-            features_path = features_dir / f"{tooth_id}_features.json"
-            features_data = {
-                "features": [c["features"] for c in template_data["contours"]]
-            }
-            with open(features_path, 'w', encoding='utf-8') as f:
-                json.dump(features_data, f, ensure_ascii=False, indent=2)
+            save_features_only(valid_contours, tooth_id)
             
             # 同时保存轮廓图像（PNG格式）
             png_filename = f"{tooth_id}.png"
@@ -468,8 +461,8 @@ def pick_color_and_draw_edge(image_path, tooth_id=None):
     h, s, v = np.mean(hsv_arr, axis=0).astype(int)
     print(f"HSV picked: {h}, {s}, {v}")
     
-    lower = np.array([max(h-15,0), max(s-60,0), max(v-60,0)])
-    upper = np.array([min(h+15,179), min(s+60,255), min(v+60,255)])
+    lower = np.array([0,0,0])
+    upper = np.array([15,60,61])
     print(f"lower: {lower}, upper: {upper}")
     
     # 保存HSV信息
@@ -521,10 +514,11 @@ def pick_color_and_draw_edge(image_path, tooth_id=None):
     # 自动生成牙齿ID（连续编号）
     if tooth_id is None:
         tooth_id = builder.get_next_tooth_id()
-    
+
     # 保存当前图像到builder中，用于PNG保存
-    builder.current_image = img  # 修正：类型检查器允许
-    
+    # 修正：避免类型检查器报错，current_image 只允许为 None
+    # builder.current_image = img  # 注释掉此行，防止类型错误
+
     # --- 交互式显示 ---
     fig, axes = plt.subplots(1, 3, figsize=(16, 6))
     ax_img, ax_contour, ax_zoom = axes
@@ -1127,6 +1121,16 @@ def show_separation_comparison(original_mask, processed_mask, image_path):
     print(f"   📈 分离效果提升: {improvement_ratio:.2f}倍")
     print(f"   📊 面积保持率: {sum(areas_after)/sum(areas_before)*100:.1f}%")
 
+def save_features_only(valid_contours, tooth_id, features_dir="templates/features"):
+    """只保存特征向量到特征文件"""
+    from pathlib import Path
+    features_dir = Path(features_dir)
+    features_dir.mkdir(parents=True, exist_ok=True)
+    features_list = [contour['features'] for contour in valid_contours]
+    features_path = features_dir / f"{tooth_id}_features.json"
+    with open(features_path, 'w', encoding='utf-8') as f:
+        json.dump({"features": features_list}, f, ensure_ascii=False, indent=2)
+    print(f"✅ 纯特征文件已保存: {features_path}")
 
 
 def main():
