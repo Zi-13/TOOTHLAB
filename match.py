@@ -10,25 +10,26 @@ import logging
 import json
 import sqlite3
 from datetime import datetime
+import matplotlib.font_manager as fm
+myfont = fm.FontProperties(fname=r"C:\Windows\Fonts\msyh.ttc")
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # 修改字体设置
-matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
-matplotlib.rcParams['axes.unicode_minus'] = False
+matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']  # 优先黑体、雅黑
+matplotlib.rcParams['axes.unicode_minus'] = False  # 负号正常显示
 plt.rcParams['font.size'] = 10
 
 #TODO 修改图片路径
-PHOTO_PATH = r'c:\Users\Jason\Desktop\tooth\test.png'
+PHOTO_PATH = r'c:\Users\Jason\Desktop\tooth\Tooth_5.png'
 # 配置常量
 class Config:
-    INPUT_VIDEO = 'c:\\Users\\Jason\\Desktop\\test.jpg'
     DEFAULT_HSV_TOLERANCE = {'h': 15, 's': 60, 'v': 60}
     FOURIER_ORDER = 80
     MIN_CONTOUR_POINTS = 20
-    SIMILARITY_THRESHOLD = 1.0  # 改为1.0作为临界值
+    SIMILARITY_THRESHOLD = 0.99  # 改为1.0作为临界值
     SIZE_TOLERANCE = 0.3
     DATABASE_PATH = "tooth_templates.db"
     TEMPLATES_DIR = "templates"
@@ -127,8 +128,8 @@ class ContourFeatureExtractor:
     def __init__(self):
         self.fourier_analyzer = FourierAnalyzer()
     
-    def extract_geometric_features(self, contour: np.ndarray, image_shape=None) -> dict:
-        features = {}
+    def extract_geometric_contours(self, contour: np.ndarray, image_shape=None) -> dict:
+        contours = {}
         area = cv2.contourArea(contour)
         perimeter = cv2.arcLength(contour, True)
         if image_shape is not None:
@@ -148,7 +149,7 @@ class ContourFeatureExtractor:
         epsilon = 0.02 * perimeter
         approx = cv2.approxPolyDP(contour, epsilon, True)
         corner_count = len(approx)
-        features.update({
+        contours.update({
             'area': area,
             'perimeter': perimeter,
             'area_norm': area_norm,
@@ -159,7 +160,7 @@ class ContourFeatureExtractor:
             'corner_count': corner_count,
             'bounding_rect': (x, y, w_box, h_box)
         })
-        return features
+        return contours
     
     def extract_hu_moments(self, contour: np.ndarray) -> np.ndarray:
         """提取Hu矩特征"""
@@ -187,37 +188,37 @@ class ContourFeatureExtractor:
                 coeffs_x = fourier_data['coeffs_x']
                 coeffs_y = fourier_data['coeffs_y']
                 # TODO 组合前11个系数（0阶+10阶*2）
-                fourier_features = np.concatenate([coeffs_x[:11], coeffs_y[:11]])
-                return fourier_features
+                fourier_contours = np.concatenate([coeffs_x[:11], coeffs_y[:11]])
+                return fourier_contours
             else:
                 return np.zeros(22)
         except Exception as e:
             logger.error(f"傅里叶描述符提取失败: {e}")
             return np.zeros(22)
     
-    def extract_all_features(self, contour: np.ndarray, points: np.ndarray, image_shape=None) -> dict:
-        features = {}
-        geometric_features = self.extract_geometric_features(contour, image_shape=image_shape)
-        features.update(geometric_features)
-        features['hu_moments'] = self.extract_hu_moments(contour)
-        features['fourier_descriptors'] = self.extract_fourier_descriptors(points)
+    def extract_all_contours(self, contour: np.ndarray, points: np.ndarray, image_shape=None) -> dict:
+        contours = {}
+        geometric_contours = self.extract_geometric_contours(contour, image_shape=image_shape)
+        contours.update(geometric_contours)
+        contours['hu_moments'] = self.extract_hu_moments(contour)
+        contours['fourier_descriptors'] = self.extract_fourier_descriptors(points)
         fourier_data = self.fourier_analyzer.analyze_contour(points, center_normalize=True)
         if fourier_data is not None:
-            features['fourier_x_fit'] = fourier_data['x_fit'].tolist()
-            features['fourier_y_fit'] = fourier_data['y_fit'].tolist()
-        return features
+            contours['fourier_x_fit'] = fourier_data['x_fit'].tolist()
+            contours['fourier_y_fit'] = fourier_data['y_fit'].tolist()
+        return contours
 
 class SimilarityCalculator:
     """相似度计算器"""
     
     @staticmethod
-    def calculate_size_similarity(features1: dict, features2: dict) -> float:
-        """计算尺寸相似度（优先用归一化特征）"""
-        area1 = features1.get('area_norm', features1.get('area', 0))
-        area2 = features2.get('area_norm', features2.get('area', 0))
-        perimeter1 = features1.get('perimeter_norm', features1.get('perimeter', 0))
-        perimeter2 = features2.get('perimeter_norm', features2.get('perimeter', 0))
-        # TODO 计算面积相似度
+    def calculate_size_similarity(contours1: dict, contours2: dict) -> float:
+        """计算尺寸相似度（只用原始面积和周长）"""
+        area1 = contours1.get('area', 0)
+        area2 = contours2.get('area', 0)
+        perimeter1 = contours1.get('perimeter', 0)
+        perimeter2 = contours2.get('perimeter', 0)
+        # 计算面积相似度
         if area1 == 0 and area2 == 0:
             area_sim = 1.0
         elif area1 == 0 or area2 == 0:
@@ -225,7 +226,7 @@ class SimilarityCalculator:
         else:
             area_ratio = min(area1, area2) / max(area1, area2)
             area_sim = area_ratio
-        # TODO 计算周长相似度
+        # 计算周长相似度
         if perimeter1 == 0 and perimeter2 == 0:
             perimeter_sim = 1.0
         elif perimeter1 == 0 or perimeter2 == 0:
@@ -236,14 +237,14 @@ class SimilarityCalculator:
         return 0.3*area_sim + 0.7*perimeter_sim
     
     @staticmethod
-    def calculate_geometric_similarity(features1: dict, features2: dict) -> float:
+    def calculate_geometric_similarity(contours1: dict, contours2: dict) -> float:
         """计算几何特征相似度"""
-        geometric_features = ['circularity', 'aspect_ratio', 'solidity']
+        geometric_contours = ['circularity', 'aspect_ratio', 'solidity']
         geometric_weights = [0.2, 0.1, 0.7]
         
         geometric_sim = []
-        for feat in geometric_features:
-            v1, v2 = features1[feat], features2[feat]
+        for feat in geometric_contours:
+            v1, v2 = contours1[feat], contours2[feat]
             if v1 == 0 and v2 == 0:
                 sim = 1.0
             elif v1 == 0 or v2 == 0:
@@ -256,11 +257,11 @@ class SimilarityCalculator:
         return sum(w * s for w, s in zip(geometric_weights, geometric_sim))
     
     @staticmethod
-    def calculate_hu_similarity(features1: dict, features2: dict) -> float:
+    def calculate_hu_similarity(contours1: dict, contours2: dict) -> float:
         """计算Hu矩相似度"""
         try:
-            hu1 = features1['hu_moments']
-            hu2 = features2['hu_moments']
+            hu1 = contours1['hu_moments']
+            hu2 = contours2['hu_moments']
             hu_sim = cosine_similarity([hu1], [hu2])[0][0]
             return max(0, hu_sim)
         except Exception as e:
@@ -268,24 +269,24 @@ class SimilarityCalculator:
             return 0.0
     
     @staticmethod
-    def calculate_fourier_similarity(features1: dict, features2: dict) -> float:
+    def calculate_fourier_similarity(contours1: dict, contours2: dict) -> float:
         """计算傅里叶描述符相似度"""
         try:
-            fourier1 = features1['fourier_descriptors']
-            fourier2 = features2['fourier_descriptors']
+            fourier1 = contours1['fourier_descriptors']
+            fourier2 = contours2['fourier_descriptors']
             fourier_sim = cosine_similarity([fourier1], [fourier2])[0][0]
             return max(0, fourier_sim)
         except Exception as e:
             logger.error(f"傅里叶相似度计算失败: {e}")
             return 0.0
     
-    def compare_contours(self, features1: dict, features2: dict, 
+    def compare_contours(self, contours1: dict, contours2: dict, 
                         size_tolerance: float = Config.SIZE_TOLERANCE) -> dict:
         """比较两个轮廓的相似度"""
         similarities = {}
         
         # TODO 计算各项相似度
-        size_similarity = self.calculate_size_similarity(features1, features2)
+        size_similarity = self.calculate_size_similarity(contours1, contours2)
         similarities['size'] = size_similarity
         
         # TODO 一级筛选：如果尺寸差异过大，直接返回低相似度
@@ -299,9 +300,9 @@ class SimilarityCalculator:
             return similarities
         
         # TODO 计算形状特征相似度
-        geometric_sim = self.calculate_geometric_similarity(features1, features2)
-        hu_sim = self.calculate_hu_similarity(features1, features2)
-        fourier_sim = self.calculate_fourier_similarity(features1, features2)
+        geometric_sim = self.calculate_geometric_similarity(contours1, contours2)
+        hu_sim = self.calculate_hu_similarity(contours1, contours2)
+        fourier_sim = self.calculate_fourier_similarity(contours1, contours2)
         
         similarities.update({
             'geometric': geometric_sim,
@@ -324,6 +325,35 @@ class SimilarityCalculator:
         
         return similarities
 
+    @staticmethod
+    def compare_contours_approx(contours1: dict, contours2: dict, rel_tol=0.01, abs_tol=0.1) -> dict:
+        # 主特征用相对误差
+        keys = ['area', 'perimeter', 'aspect_ratio', 'circularity', 'solidity']
+        all_close = True
+        for k in keys:
+            v1 = float(contours1.get(k, 0))
+            v2 = float(contours2.get(k, 0))
+            if abs(v1 - v2) / (abs(v1) + 1e-6) > rel_tol:
+                all_close = False
+                break
+        # Hu矩、傅里叶用绝对误差
+        hu1 = np.array(contours1.get('hu_moments', []))
+        hu2 = np.array(contours2.get('hu_moments', []))
+        if hu1.shape == hu2.shape and np.all(np.abs(hu1 - hu2) < abs_tol):
+            pass
+        else:
+            all_close = False
+        f1 = np.array(contours1.get('fourier_descriptors', []))
+        f2 = np.array(contours2.get('fourier_descriptors', []))
+        if f1.shape == f2.shape and np.all(np.abs(f1 - f2) < abs_tol):
+            pass
+        else:
+            all_close = False
+        if all_close:
+            return {'overall': 1.0, 'size': 1.0, 'geometric': 1.0, 'hu_moments': 1.0, 'fourier': 1.0}
+        # 否则走原有逻辑
+        return SimilarityCalculator().compare_contours(contours1, contours2)
+
 class DatabaseInterface:
     """数据库接口类"""
     
@@ -344,31 +374,31 @@ class DatabaseInterface:
             # 检查是否有增强的特征列
             cursor.execute("PRAGMA table_info(templates)")
             columns = [column[1] for column in cursor.fetchall()]
-            has_features = 'features_json' in columns
+            has_contours = 'contours_json' in columns
             
-            if has_features:
+            if has_contours:
                 # 使用增强的数据库结构
                 cursor.execute('''
-                    SELECT tooth_id, contour_file, features_json, geometric_weights, 
+                    SELECT tooth_id, contour_file, contours_json, geometric_weights, 
                            similarity_weights, num_contours, total_area
-                    FROM templates WHERE features_json IS NOT NULL
+                    FROM templates WHERE contours_json IS NOT NULL
                 ''')
                 
                 templates = {}
                 for row in cursor.fetchall():
-                    tooth_id, contour_file, features_json, geo_weights, sim_weights, num_contours, total_area = row
+                    tooth_id, contour_file, contours_json, geo_weights, sim_weights, num_contours, total_area = row
                     
                     # 解析特征数据
-                    features_data = json.loads(features_json) if features_json else []
+                    contours_data = json.loads(contours_json) if contours_json else []
                     
                     # 转换为match.py兼容格式
-                    compatible_features = []
-                    for feature in features_data:
+                    compatible_contours = []
+                    for feature in contours_data:
                         converted = self._convert_to_match_format(feature)
-                        compatible_features.append(converted)
+                        compatible_contours.append(converted)
                     
                     templates[tooth_id] = {
-                        'features': compatible_features,
+                        'contours': compatible_contours,
                         'contour_file': contour_file,
                         'num_contours': num_contours,
                         'total_area': total_area,
@@ -386,16 +416,16 @@ class DatabaseInterface:
                 templates = {}
                 for tooth_id, contour_file, num_contours, total_area in cursor.fetchall():
                     # 尝试加载特征文件
-                    features = self._load_features_from_file(tooth_id)
-                    if features:
+                    contours = self._load_contours_from_file(tooth_id)
+                    if contours:
                         templates[tooth_id] = {
-                            'features': features,
+                            'contours': contours,
                             'contour_file': contour_file,
                             'num_contours': num_contours,
                             'total_area': total_area
                         }
             
-            logger.info(f"📚 已加载 {len(templates)} 个模板，共 {sum(len(t['features']) for t in templates.values())} 个轮廓特征")
+            logger.info(f"📚 已加载 {len(templates)} 个模板，共 {sum(len(t['contours']) for t in templates.values())} 个轮廓特征")
             return templates
             
         except Exception as e:
@@ -404,39 +434,38 @@ class DatabaseInterface:
         finally:
             conn.close()
     
-    def _convert_to_match_format(self, template_feature):
-        """将模板特征转换为match.py兼容格式"""
-        geo_features = template_feature['geometric_features']
-        
+    def _convert_to_match_format(self, contour_dict):
+        """将单个contour字典转换为match.py兼容格式"""
+        features = contour_dict['features']
         return {
-            'area': geo_features['area'],
-            'perimeter': geo_features['perimeter'],
-            'aspect_ratio': geo_features['aspect_ratio'],
-            'circularity': geo_features['circularity'],
-            'solidity': geo_features['solidity'],
-            'corner_count': geo_features['corner_count'],
-            'hu_moments': np.array(template_feature['hu_moments']),
-            'fourier_descriptors': np.array(template_feature['fourier_descriptors'])
+            'area': features['area'],
+            'perimeter': features['perimeter'],
+            'aspect_ratio': features['aspect_ratio'],
+            'circularity': features['circularity'],
+            'solidity': features['solidity'],
+            'corner_count': features['corner_count'],
+            'hu_moments': np.array(features['hu_moments']),
+            'fourier_descriptors': np.array(features['fourier_descriptors'])
         }
     
-    def _load_features_from_file(self, tooth_id):
+    def _load_contours_from_file(self, tooth_id):
         """从特征文件加载特征"""
-        features_file = self.templates_dir / "features" / f"{tooth_id}_features.json"
+        contours_file = self.templates_dir / "contours" / f"{tooth_id}.json"
         
-        if not features_file.exists():
-            logger.warning(f"特征文件不存在: {features_file}")
+        if not contours_file.exists():
+            logger.warning(f"特征文件不存在: {contours_file}")
             return []
         
         try:
-            with open(features_file, 'r', encoding='utf-8') as f:
-                features_data = json.load(f)
+            with open(contours_file, 'r', encoding='utf-8') as f:
+                contours_data = json.load(f)
             
-            compatible_features = []
-            for feature in features_data['features']:
-                converted = self._convert_to_match_format(feature)
-                compatible_features.append(converted)
+            compatible_contours = []
+            for contour in contours_data['contours']:
+                converted = self._convert_to_match_format(contour)
+                compatible_contours.append(converted)
             
-            return compatible_features
+            return compatible_contours
             
         except Exception as e:
             logger.error(f"❌ 加载特征文件失败: {e}")
@@ -482,6 +511,19 @@ class DatabaseInterface:
         finally:
             conn.close()
 
+import os
+import json
+
+def load_features_templates(features_dir="templates/features"):
+    templates = {}
+    for fname in os.listdir(features_dir):
+        if fname.endswith("_features.json"):
+            tooth_id = fname.split("_features.json")[0].upper()
+            with open(os.path.join(features_dir, fname), "r", encoding="utf-8") as f:
+                data = json.load(f)
+            templates[tooth_id] = data["features"]
+    return templates
+
 class ToothMatcher:
     """牙齿匹配器主类 - 增强版"""
     
@@ -490,12 +532,12 @@ class ToothMatcher:
         self.similarity_calculator = SimilarityCalculator()
         self.fourier_analyzer = FourierAnalyzer()
         self.db_interface = DatabaseInterface()
-        self.templates = {}
+        self.templates = load_features_templates()
         self.current_image_path = None
     
     def load_templates(self):
         """加载模板库"""
-        self.templates = self.db_interface.load_all_templates()
+        self.templates = load_features_templates()
         return len(self.templates) > 0
     
     def match_against_database(self, query_features_list, threshold=Config.SIMILARITY_THRESHOLD):
@@ -503,19 +545,14 @@ class ToothMatcher:
         if not self.templates:
             logger.warning("❌ 未加载模板数据，请先使用 BuildTheLab 创建模板")
             return {}
-        
         all_matches = {}
-        
         for query_idx, query_features in enumerate(query_features_list):
             query_matches = []
-            
-            for template_id, template_data in self.templates.items():
-                template_features = template_data['features']
-                
-                for template_idx, template_feature in enumerate(template_features):
-                    similarities = self.similarity_calculator.compare_contours(
-                        query_features, template_feature, Config.SIZE_TOLERANCE)
-                    
+            for template_id, template_features_list in self.templates.items():
+                for template_idx, template_features in enumerate(template_features_list):
+                    similarities = self.similarity_calculator.compare_contours_approx(
+                        query_features, template_features, rel_tol=0.01, abs_tol=0.1)
+                    # 删除详细调试输出
                     if similarities['overall'] >= threshold:
                         match_info = {
                             'template_id': template_id,
@@ -525,31 +562,28 @@ class ToothMatcher:
                             'query_contour_idx': query_idx
                         }
                         query_matches.append(match_info)
-                        
                         # 保存匹配结果到数据库
                         if self.current_image_path:
                             self.db_interface.save_match_result(
                                 template_id, self.current_image_path, query_idx, similarities
                             )
-            
             # 按相似度排序
             query_matches.sort(key=lambda x: x['similarity'], reverse=True)
             all_matches[f'query_{query_idx}'] = query_matches
-        
         return all_matches
     
-    def find_similar_contours(self, target_features: dict, all_features: list, 
+    def find_similar_contours(self, target_contours: dict, all_contours: list, 
                              threshold: float = Config.SIMILARITY_THRESHOLD,
                              size_tolerance: float = Config.SIZE_TOLERANCE) -> list:
         """找到与目标轮廓相似的所有轮廓（当前图像内部）"""
         similar_contours = []
         
-        for i, features in enumerate(all_features):
-            if features == target_features:
+        for i, contours in enumerate(all_contours):
+            if contours == target_contours:
                 continue
             
             similarities = self.similarity_calculator.compare_contours(
-                target_features, features, size_tolerance)
+                target_contours, contours, size_tolerance)
             
             if similarities['overall'] >= threshold:
                 similar_contours.append({
@@ -591,7 +625,7 @@ class ToothMatcher:
         color_extract = cv2.bitwise_and(img, img, mask=mask)
         
         # 处理轮廓
-        valid_contours, all_features = self._process_contours(mask)
+        valid_contours, all_contours = self._process_contours(mask)
         
         if not valid_contours:
             logger.warning("未检测到有效轮廓")
@@ -599,8 +633,12 @@ class ToothMatcher:
         
         logger.info(f"检测到 {len(valid_contours)} 个有效轮廓")
         
+        # 修正 query_features_list 的生成方式
+        query_features_list = [c['contours'] for c in valid_contours]
+        matches = self.match_against_database(query_features_list)
+        
         # 显示交互式界面
-        self._show_interactive_display(color_extract, valid_contours, all_features)
+        self._show_interactive_display(color_extract, valid_contours, all_contours, matches)
     
     def _pick_colors(self, img: np.ndarray, hsv: np.ndarray) -> list:
         """颜色选择"""
@@ -626,8 +664,8 @@ class ToothMatcher:
         logger.info(f"HSV picked: {h}, {s}, {v}")
         
         tolerance = Config.DEFAULT_HSV_TOLERANCE
-        lower = np.array([max(h-tolerance['h'], 0), max(s-tolerance['s'], 0), max(v-tolerance['v'], 0)])
-        upper = np.array([min(h+tolerance['h'], 179), min(s+tolerance['s'], 255), min(v+tolerance['v'], 255)])
+        lower = np.array([0,0,0])
+        upper = np.array([15,60,61])
         logger.info(f"HSV范围 - lower: {lower}, upper: {upper}")
         
         return cv2.inRange(hsv, lower, upper)
@@ -635,7 +673,7 @@ class ToothMatcher:
     def _process_contours(self, mask: np.ndarray) -> tuple:
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         valid_contours = []
-        all_features = []
+        all_contours = []
         areas = [cv2.contourArea(c) for c in contours]
         if areas:
             max_area = max(areas)
@@ -656,20 +694,22 @@ class ToothMatcher:
             area = cv2.contourArea(contour)
             length = cv2.arcLength(contour, True)
             points = contour[:, 0, :]
-            features = self.feature_extractor.extract_all_features(contour, points, image_shape=image_shape)
+            contours = self.feature_extractor.extract_all_contours(contour, points, image_shape=image_shape)
+            # if i == 1:  # 假设你要比对第1个色块
+            #      print("【调试】当前色块特征：", contours)
             valid_contours.append({
                 'contour': contour,
                 'points': points,
                 'area': area,
                 'length': length,
                 'idx': i,
-                'features': features
+                'contours': contours
             })
-            all_features.append(features)
-        return valid_contours, all_features
+            all_contours.append(contours)
+        return valid_contours, all_contours
     
     def _show_interactive_display(self, color_extract: np.ndarray, 
-                                 valid_contours: list, all_features: list):
+                                 valid_contours: list, all_contours: list, matches):
         """显示交互式界面 - 增强版"""
         n_contours = len(valid_contours)
         linewidth = max(0.5, 2 - 0.03 * n_contours)
@@ -685,16 +725,16 @@ class ToothMatcher:
             ax_img, ax_fit, ax_zoom = axes
             ax_db_matches = ax_stats = ax_history = None
         
-        ax_img.set_title("颜色提取结果")
+        ax_img.set_title("颜色提取结果", fontproperties=myfont)
         ax_img.imshow(cv2.cvtColor(color_extract, cv2.COLOR_BGR2RGB))
         ax_img.axis('off')
         
-        ax_fit.set_title("轮廓显示")
+        ax_fit.set_title("轮廓显示", fontproperties=myfont)
         ax_fit.axis('equal')
         ax_fit.invert_yaxis()
         ax_fit.grid(True)
         
-        ax_zoom.set_title("色块放大视图")
+        ax_zoom.set_title("色块放大视图", fontproperties=myfont)
         ax_zoom.axis('equal')
         ax_zoom.invert_yaxis()
         ax_zoom.grid(True)
@@ -702,33 +742,33 @@ class ToothMatcher:
         # 初始化数据库匹配信息
         if self.templates:
             if ax_db_matches is not None:
-                ax_db_matches.set_title("数据库匹配结果")
+                ax_db_matches.set_title("数据库匹配结果", fontproperties=myfont)
                 ax_db_matches.axis('off')
             if ax_stats is not None:
-                ax_stats.set_title("模板库统计")
+                ax_stats.set_title("模板库统计", fontproperties=myfont)
                 ax_stats.axis('off')
             if ax_history is not None:
-                ax_history.set_title("匹配历史")
+                ax_history.set_title("匹配历史", fontproperties=myfont)
                 ax_history.axis('off')
             # 显示模板库统计
             total_templates = len(self.templates)
-            total_contours = sum(len(t['features']) for t in self.templates.values())
+            total_contours = sum(len(t) for t in self.templates.values()) # 这里需要调整，因为 templates 现在是 dict
             stats_text = f"模板库统计:\n总模板数: {total_templates}\n总轮廓数: {total_contours}\n\n"
             stats_text += "模板列表:\n"
             for i, (template_id, data) in enumerate(list(self.templates.items())[:10]):
-                stats_text += f"{i+1}. {template_id} ({data['num_contours']}个轮廓)\n"
+                stats_text += f"{i+1}. {template_id} ({len(data)}个轮廓)\n" # 这里需要调整，因为 data 是 list
             if total_templates > 10:
                 stats_text += f"... 还有 {total_templates-10} 个模板"
             if ax_stats is not None:
                 ax_stats.text(0.05, 0.95, stats_text, transform=ax_stats.transAxes, 
-                             fontsize=10, verticalalignment='top', fontfamily='monospace')
+                             fontsize=10, verticalalignment='top', fontproperties=myfont)
         
         selected_idx = [0]
         
         def draw_all(highlight_idx=None):
-            self._draw_contours_enhanced(ax_fit, ax_zoom, valid_contours, all_features, 
+            self._draw_contours_enhanced(ax_fit, ax_zoom, valid_contours, all_contours, 
                                         highlight_idx, linewidth, show_legend, fig,
-                                        ax_db_matches if self.templates else None)
+                                        ax_db_matches if self.templates else None, matches)
         
         def on_click(event):
             if self.templates and event.inaxes not in [ax_img, ax_fit, ax_zoom, ax_db_matches]:
@@ -757,11 +797,11 @@ class ToothMatcher:
         plt.tight_layout()
         plt.show()
     
-    def _draw_contours_enhanced(self, ax_fit, ax_zoom, valid_contours, all_features, 
-                               highlight_idx, linewidth, show_legend, fig, ax_db_matches=None):
+    def _draw_contours_enhanced(self, ax_fit, ax_zoom, valid_contours, all_contours, 
+                               highlight_idx, linewidth, show_legend, fig, ax_db_matches=None, matches=None):
         """绘制轮廓 - 增强版"""
         ax_fit.clear()
-        ax_fit.set_title(f"轮廓显示 (模板库: {'已加载' if self.templates else '未加载'})")
+        ax_fit.set_title(f"轮廓显示 (模板库: {'已加载' if self.templates else '未加载'})", fontproperties=myfont)
         ax_fit.axis('equal')
         ax_fit.invert_yaxis()
         ax_fit.grid(True)
@@ -774,14 +814,14 @@ class ToothMatcher:
         database_matches = {}
         
         if highlight_idx is not None:
-            target_features = valid_contours[highlight_idx]['features']
+            target_contours = valid_contours[highlight_idx]['contours']
             
             # 当前图像内相似轮廓
-            similar_contours = self.find_similar_contours(target_features, all_features)
+            similar_contours = self.find_similar_contours(target_contours, all_contours)
             
             # 数据库匹配
             if self.templates:
-                query_features_list = [valid_contours[highlight_idx]['features']]
+                query_features_list = [valid_contours[highlight_idx]['contours']]
                 database_matches = self.match_against_database(query_features_list)
         
         # 绘制所有轮廓
@@ -824,47 +864,48 @@ class ToothMatcher:
                        color=text_color, ha='center', va='center', zorder=zorder+2)
         
         if show_legend:
-            ax_fit.legend()
+            ax_fit.legend(prop=myfont)
         
         # 显示特征信息和数据库匹配结果
-        self._update_info_display_enhanced(ax_fit, ax_zoom, valid_contours, all_features, 
+        self._update_info_display_enhanced(ax_fit, ax_zoom, valid_contours, all_contours, 
                                           highlight_idx, similar_contours, database_matches, 
-                                          fig, ax_db_matches)
+                                          fig, ax_db_matches, matches)
     
-    def _update_info_display_enhanced(self, ax_fit, ax_zoom, valid_contours, all_features, 
+    def _update_info_display_enhanced(self, ax_fit, ax_zoom, valid_contours, all_contours, 
                                      highlight_idx, similar_contours, database_matches, 
-                                     fig, ax_db_matches=None):
+                                     fig, ax_db_matches=None, matches=None):
         """更新信息显示 - 增强版"""
         info = valid_contours[highlight_idx if highlight_idx is not None else 0]
-        features = info['features']
+        contours = info['contours']
         
         # 构建特征信息
-        feature_info = self._build_feature_info_enhanced(info, features, similar_contours, 
+        feature_info = self._build_feature_info_enhanced(info, contours, similar_contours, 
                                                         valid_contours, database_matches, highlight_idx)
         
         # 显示特征信息
         ax_fit.text(0.02, -0.25, feature_info, transform=ax_fit.transAxes, 
-                   fontsize=8, color='red', va='top', ha='left')
+                   fontsize=8, color='red', va='top', ha='left', fontproperties=myfont)
         
         # 更新放大
         self._update_zoom_view(ax_zoom, info, highlight_idx)
         
         # 更新数据库匹配视图
         if ax_db_matches and database_matches:
+            print("当前all_matches keys:", database_matches.keys(), "当前highlight_idx:", highlight_idx)
             self._update_database_matches_view(ax_db_matches, database_matches, highlight_idx)
         
         fig.canvas.draw_idle()
     
-    def _build_feature_info_enhanced(self, info, features, similar_contours, 
+    def _build_feature_info_enhanced(self, info, contours, similar_contours, 
                                     valid_contours, database_matches, highlight_idx):
         """构建增强的特征信息字符串"""
         feature_info = f"色块编号: {info['idx']+1}\n"
-        feature_info += f"面积: {features['area']:.2f}\n"
-        feature_info += f"周长: {features['perimeter']:.2f}\n"
-        feature_info += f"长宽比: {features['aspect_ratio']:.3f}\n"
-        feature_info += f"圆形度: {features['circularity']:.3f}\n"
-        feature_info += f"凸度: {features['solidity']:.3f}\n"
-        feature_info += f"角点数: {features['corner_count']}\n"
+        feature_info += f"面积: {contours['area']:.2f}\n"
+        feature_info += f"周长: {contours['perimeter']:.2f}\n"
+        feature_info += f"长宽比: {contours['aspect_ratio']:.3f}\n"
+        feature_info += f"圆形度: {contours['circularity']:.3f}\n"
+        feature_info += f"凸度: {contours['solidity']:.3f}\n"
+        feature_info += f"角点数: {contours['corner_count']}\n"
         
         # 当前图像相似轮廓信息
         if highlight_idx is not None and similar_contours:
@@ -888,37 +929,40 @@ class ToothMatcher:
     def _update_database_matches_view(self, ax_db_matches, database_matches, highlight_idx):
         """更新数据库匹配视图"""
         ax_db_matches.clear()
-        ax_db_matches.set_title("数据库匹配结果")
+        ax_db_matches.set_title("数据库匹配结果", fontproperties=myfont)
         ax_db_matches.axis('off')
-        
-        if f'query_{highlight_idx}' in database_matches:
-            matches = database_matches[f'query_{highlight_idx}']
-            
+
+        key = f'query_{highlight_idx}'
+        if key in database_matches:
+            matches = database_matches[key]
             if matches:
                 match_text = f"🎯 色块 {highlight_idx+1} 的数据库匹配:\n\n"
                 match_text += f"{'排名':<4} {'模板ID':<15} {'相似度':<8} {'详细分数'}\n"
                 match_text += "-" * 50 + "\n"
-                
                 for i, match in enumerate(matches[:8]):
                     details = match['details']
                     match_text += f"{i+1:<4} {match['template_id']:<15} {match['similarity']:<8.3f} "
                     match_text += f"几何:{details['geometric']:.2f} Hu:{details['hu_moments']:.2f}\n"
-                
                 if len(matches) > 8:
                     match_text += f"\n... 还有 {len(matches)-8} 个匹配"
-                
             else:
                 match_text = f"❌ 色块 {highlight_idx+1} 无数据库匹配\n\n"
                 match_text += "可能原因:\n"
-                match_text += "• 相似度低于阈值 (1.0)\n"
+                match_text += "• 相似度低于阈值 (0.99)\n"
                 match_text += "• 模板库中无相似轮廓\n"
                 match_text += "• 特征提取失败"
-            
-            ax_db_matches.text(0.05, 0.95, match_text, transform=ax_db_matches.transAxes, 
-                              fontsize=9, verticalalignment='top', fontfamily='monospace')
+        else:
+            match_text = f"❌ 色块 {highlight_idx+1} 无数据库匹配\n\n"
+            match_text += "可能原因:\n"
+            match_text += "• 相似度低于阈值 (0.99)\n"
+            match_text += "• 模板库中无相似轮廓\n"
+            match_text += "• 特征提取失败"
+
+        ax_db_matches.text(0.05, 0.95, match_text, transform=ax_db_matches.transAxes, 
+                          fontsize=9, verticalalignment='top', fontproperties=myfont)
 
     def _update_zoom_view(self, ax_zoom, info, highlight_idx):
-        features = info['features']  # ← 这行是关键
+        contours = info['contours']  # ← 这行是关键
         ax_zoom.clear()
         contour = info['contour']
         x, y, w, h = cv2.boundingRect(contour)
@@ -943,11 +987,11 @@ class ToothMatcher:
             ax_zoom.plot(points[:, 0], points[:, 1], 'r-')
             ax_zoom.fill(points[:, 0], points[:, 1], alpha=0.3)
             ax_zoom.set_aspect('equal')
-        ax_zoom.set_title(f'色块放大视图 {info["idx"]+1}')
+        ax_zoom.set_title(f'色块放大视图 {info["idx"]+1}', fontproperties=myfont)
         ax_zoom.axis('off')
 
-        if 'fourier_x_fit' in features and 'fourier_y_fit' in features:
-            ax_zoom.plot(features['fourier_x_fit'], features['fourier_y_fit'], 'g--', linewidth=2, label='傅里叶平滑')
+        if 'fourier_x_fit' in contours and 'fourier_y_fit' in contours:
+            ax_zoom.plot(contours['fourier_x_fit'], contours['fourier_y_fit'], 'g--', linewidth=2, label='傅里叶平滑')
 
 
 
