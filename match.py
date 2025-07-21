@@ -781,9 +781,8 @@ class ToothMatcher:
                 return
                 
             if self.templates and event.inaxes == ax_db_matches and event.xdata is not None and event.ydata is not None:
-                transform = ax_db_matches.transAxes.inverted()
-                click_x, click_y = transform.transform((event.xdata, event.ydata))
-                click_y = event.ydata / ax_db_matches.bbox.height if ax_db_matches.bbox.height > 0 else 0
+                click_x = event.xdata if event.xdata is not None else 0
+                click_y = event.ydata if event.ydata is not None else 0
                 
                 for pos_info in self.match_text_positions:
                     if (pos_info['x_min'] <= click_x <= pos_info['x_max'] and 
