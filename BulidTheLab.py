@@ -420,6 +420,30 @@ class ToothTemplateBuilder:
         contours_dir = self.templates_dir / "contours"
         if not contours_dir.exists():
             return []
+    
+    def delete_template(self, tooth_id: str) -> bool:
+        """删除指定模板"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM templates WHERE tooth_id = ?", (tooth_id,))
+            self.conn.commit()
+            
+            json_path = self.templates_dir / "contours" / f"{tooth_id}.json"
+            if json_path.exists():
+                json_path.unlink()
+            
+            png_path = self.templates_dir / "images" / f"{tooth_id}.png"
+            if png_path.exists():
+                png_path.unlink()
+            
+            features_path = self.templates_dir / "features" / f"{tooth_id}_features.json"
+            if features_path.exists():
+                features_path.unlink()
+            
+            return cursor.rowcount > 0
+        except Exception as e:
+            print(f"❌ 删除模板失败: {e}")
+            return False
         
         template_files = list(contours_dir.glob("TOOTH_*.json"))
         template_ids = [f.stem for f in template_files]

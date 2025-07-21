@@ -1,0 +1,57 @@
+/* TOOTHLAB Web界面样式 */
+.navbar-brand {
+    font-weight: bold;
+}
+
+.card {
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    margin-bottom: 20px;
+}
+
+.btn-primary {
+    background-color: #007bff;
+    border-color: #007bff;
+}
+
+.footer {
+    background-color: #f8f9fa;
+    padding: 20px 0;
+    margin-top: 50px;
+}
+
+.dragover {
+    border: 2px dashed #007bff;
+    background-color: #f8f9fa;
+}
+
+.upload-area {
+    border: 2px dashed #dee2e6;
+    border-radius: 8px;
+    padding: 40px;
+    text-align: center;
+    transition: all 0.3s ease;
+}
+
+.upload-area:hover {
+    border-color: #007bff;
+    background-color: #f8f9fa;
+}
+
+.result-card {
+    border-left: 4px solid #28a745;
+}
+
+.confidence-high {
+    color: #28a745;
+    font-weight: bold;
+}
+
+.confidence-medium {
+    color: #ffc107;
+    font-weight: bold;
+}
+
+.confidence-low {
+    color: #dc3545;
+    font-weight: bold;
+}

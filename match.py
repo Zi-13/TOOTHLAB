@@ -209,6 +209,16 @@ class ContourFeatureExtractor:
         return contours
 
 class SimilarityCalculator:
+    """相似度计算器 - 支持分层匹配策略"""
+    
+    def __init__(self):
+        self.weights = {
+            'geometric': 0.3,
+            'hu_moments': 0.3,
+            'fourier': 0.4
+        }
+        self.coarse_threshold = 0.3
+        self.fine_threshold = 0.7
     """相似度计算器"""
     
     @staticmethod
@@ -256,13 +266,52 @@ class SimilarityCalculator:
         
         return sum(w * s for w, s in zip(geometric_weights, geometric_sim))
     
+    def coarse_match(self, contours1: dict, contours2: dict) -> bool:
+        """粗匹配：基于几何特征快速筛选"""
+        try:
+            geo_sim = self.calculate_geometric_similarity(contours1, contours2)
+            return geo_sim > self.coarse_threshold
+        except Exception:
+            return False
+    
+    def fine_match(self, contours1: dict, contours2: dict) -> tuple:
+        """精匹配：完整相似度计算"""
+        try:
+            geo_sim = self.calculate_geometric_similarity(contours1, contours2)
+            hu_sim = self.calculate_hu_similarity(contours1, contours2)
+            fourier_sim = self.calculate_fourier_similarity(contours1, contours2)
+            
+            total_similarity = (
+                geo_sim * self.weights['geometric'] +
+                hu_sim * self.weights['hu_moments'] +
+                fourier_sim * self.weights['fourier']
+            )
+            
+            is_match = total_similarity > self.fine_threshold
+            return total_similarity, is_match
+        except Exception as e:
+            logger.error(f"精匹配计算失败: {e}")
+            return 0.0, False
+    
+    def calculate_hausdorff_distance(self, points1: np.ndarray, points2: np.ndarray) -> float:
+        """计算Hausdorff距离"""
+        try:
+            from scipy.spatial.distance import directed_hausdorff
+            dist1 = directed_hausdorff(points1, points2)[0]
+            dist2 = directed_hausdorff(points2, points1)[0]
+            return max(dist1, dist2)
+        except ImportError:
+            distances1 = np.array([np.min(np.linalg.norm(points2 - p1, axis=1)) for p1 in points1])
+            distances2 = np.array([np.min(np.linalg.norm(points1 - p2, axis=1)) for p2 in points2])
+            return max(np.max(distances1), np.max(distances2))
+    
     @staticmethod
     def calculate_hu_similarity(contours1: dict, contours2: dict) -> float:
         """计算Hu矩相似度"""
         try:
             hu1 = contours1['hu_moments']
             hu2 = contours2['hu_moments']
-            hu_sim = cosine_similarity([hu1], [hu2])[0][0]
+            hu_sim = cosine_similarity(np.array([hu1]), np.array([hu2]))[0][0]
             return max(0, hu_sim)
         except Exception as e:
             logger.error(f"Hu矩相似度计算失败: {e}")
@@ -274,7 +323,7 @@ class SimilarityCalculator:
         try:
             fourier1 = contours1['fourier_descriptors']
             fourier2 = contours2['fourier_descriptors']
-            fourier_sim = cosine_similarity([fourier1], [fourier2])[0][0]
+            fourier_sim = cosine_similarity(np.array([fourier1]), np.array([fourier2]))[0][0]
             return max(0, fourier_sim)
         except Exception as e:
             logger.error(f"傅里叶相似度计算失败: {e}")

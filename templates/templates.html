@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+
+{% block title %}模板管理 - TOOTHLAB{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h2>模板管理</h2>
+        <p class="text-muted">批量上传和管理牙齿模板</p>
+    </div>
+</div>
+
+<div class="row mt-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5>批量上传模板</h5>
+            </div>
+            <div class="card-body">
+                <form id="uploadForm" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label for="files" class="form-label">选择图像文件</label>
+                        <input type="file" class="form-control" id="files" name="files" multiple accept=".png,.jpg,.jpeg,.bmp">
+                        <div class="form-text">支持 PNG, JPG, JPEG, BMP 格式，可多选</div>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-upload"></i> 开始上传
+                    </button>
+                </form>
+                <div id="uploadProgress" class="mt-3" style="display: none;">
+                    <div class="progress">
+                        <div class="progress-bar" role="progressbar" style="width: 0%"></div>
+                    </div>
+                </div>
+                <div id="uploadResult" class="mt-3"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5>现有模板</h5>
+                <button class="btn btn-sm btn-outline-primary" onclick="refreshTemplates()">
+                    <i class="fas fa-refresh"></i> 刷新
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="templatesList">
+                    <div class="text-center">
+                        <div class="spinner-border" role="status">
+                            <span class="visually-hidden">加载中...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const files = document.getElementById('files').files;
+    if (files.length === 0) {
+        alert('请选择文件');
+        return;
+    }
+    
+    const formData = new FormData();
+    for (let file of files) {
+        formData.append('files', file);
+    }
+    
+    const progressDiv = document.getElementById('uploadProgress');
+    const resultDiv = document.getElementById('uploadResult');
+    
+    progressDiv.style.display = 'block';
+    resultDiv.innerHTML = '';
+    
+    try {
+        const response = await fetch('/api/batch_upload', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            resultDiv.innerHTML = `
+                <div class="alert alert-success">
+                    <i class="fas fa-check-circle"></i> ${data.message}
+                    <br>创建的模板: ${data.results.templates_created.join(', ')}
+                </div>
+            `;
+            refreshTemplates();
+        } else {
+            throw new Error(data.message || '上传失败');
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `
+            <div class="alert alert-danger">
+                <i class="fas fa-exclamation-circle"></i> 上传失败: ${error.message}
+            </div>
+        `;
+    } finally {
+        progressDiv.style.display = 'none';
+    }
+});
+
+async function refreshTemplates() {
+    const listDiv = document.getElementById('templatesList');
+    listDiv.innerHTML = '<div class="text-center"><div class="spinner-border" role="status"></div></div>';
+    
+    try {
+        const response = await fetch('/api/templates');
+        const data = await response.json();
+        
+        if (data.success && data.templates.length > 0) {
+            let html = '<div class="row">';
+            data.templates.forEach(template => {
+                html += `
+                    <div class="col-md-4 mb-3">
+                        <div class="card">
+                            <div class="card-body">
+                                <h6 class="card-title">${template.id || template.tooth_id}</h6>
+                                <p class="card-text small text-muted">
+                                    创建时间: ${template.created_at || '未知'}
+                                </p>
+                                <button class="btn btn-sm btn-danger" onclick="deleteTemplate('${template.id || template.tooth_id}')">
+                                    <i class="fas fa-trash"></i> 删除
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            listDiv.innerHTML = html;
+        } else {
+            listDiv.innerHTML = '<div class="text-center text-muted">暂无模板</div>';
+        }
+    } catch (error) {
+        listDiv.innerHTML = '<div class="alert alert-danger">加载模板列表失败</div>';
+    }
+}
+
+async function deleteTemplate(templateId) {
+    if (!confirm(`确定要删除模板 ${templateId} 吗？`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/templates/${templateId}`, {
+            method: 'DELETE'
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            alert('删除成功');
+            refreshTemplates();
+        } else {
+            alert('删除失败');
+        }
+    } catch (error) {
+        alert('删除失败: ' + error.message);
+    }
+}
+
+refreshTemplates();
+</script>
+{% endblock %}
