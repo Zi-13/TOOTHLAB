@@ -23,7 +23,10 @@ from sklearn.metrics.pairwise import cosine_similarity
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-PHOTO_PATH = r'c:\Users\Jason\Desktop\tooth\Tooth_5.png'
+from config import Config
+
+config = Config()
+PHOTO_PATH = config.get_photo_path()
 
 class FourierAnalyzer:
     @staticmethod
@@ -174,9 +177,10 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei']  # 黑体
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 class ToothTemplateBuilder:
-    def __init__(self, database_path="tooth_templates.db", templates_dir="templates"):
-        self.database_path = database_path
-        self.templates_dir = Path(templates_dir)
+    def __init__(self, database_path=None, templates_dir=None):
+        self.config = Config()
+        self.database_path = database_path or self.config.get_database_path()
+        self.templates_dir = Path(templates_dir or self.config.get_templates_dir())
         self.templates_dir.mkdir(exist_ok=True)
         (self.templates_dir / "contours").mkdir(exist_ok=True)
         (self.templates_dir / "images").mkdir(exist_ok=True)
