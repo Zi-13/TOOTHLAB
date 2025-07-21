@@ -128,8 +128,8 @@ class ContourFeatureExtractor:
     def __init__(self):
         self.fourier_analyzer = FourierAnalyzer()
     
-    def extract_geometric_contours(self, contour: np.ndarray, image_shape=None) -> dict:
-        contours = {}
+    def extract_geometric_features(self, contour: np.ndarray, image_shape=None) -> dict:
+        features = {}
         area = cv2.contourArea(contour)
         perimeter = cv2.arcLength(contour, True)
         if image_shape is not None:
@@ -149,7 +149,7 @@ class ContourFeatureExtractor:
         epsilon = 0.02 * perimeter
         approx = cv2.approxPolyDP(contour, epsilon, True)
         corner_count = len(approx)
-        contours.update({
+        features.update({
             'area': area,
             'perimeter': perimeter,
             'area_norm': area_norm,
@@ -160,7 +160,7 @@ class ContourFeatureExtractor:
             'corner_count': corner_count,
             'bounding_rect': (x, y, w_box, h_box)
         })
-        return contours
+        return features
     
     def extract_hu_moments(self, contour: np.ndarray) -> np.ndarray:
         """提取Hu矩特征"""
@@ -196,17 +196,21 @@ class ContourFeatureExtractor:
             logger.error(f"傅里叶描述符提取失败: {e}")
             return np.zeros(22)
     
-    def extract_all_contours(self, contour: np.ndarray, points: np.ndarray, image_shape=None) -> dict:
-        contours = {}
-        geometric_contours = self.extract_geometric_contours(contour, image_shape=image_shape)
-        contours.update(geometric_contours)
-        contours['hu_moments'] = self.extract_hu_moments(contour)
-        contours['fourier_descriptors'] = self.extract_fourier_descriptors(points)
+    def extract_all_features(self, contour: np.ndarray, points: np.ndarray, image_shape=None) -> dict:
+        features = {}
+        geometric_features = self.extract_geometric_features(contour, image_shape=image_shape)
+        features.update(geometric_features)
+        features['hu_moments'] = self.extract_hu_moments(contour)
+        features['fourier_descriptors'] = self.extract_fourier_descriptors(points)
         fourier_data = self.fourier_analyzer.analyze_contour(points, center_normalize=True)
         if fourier_data is not None:
-            contours['fourier_x_fit'] = fourier_data['x_fit'].tolist()
-            contours['fourier_y_fit'] = fourier_data['y_fit'].tolist()
-        return contours
+            features['fourier_x_fit'] = fourier_data['x_fit'].tolist()
+            features['fourier_y_fit'] = fourier_data['y_fit'].tolist()
+    
+    def extract_all_contours(self, contour: np.ndarray, points: np.ndarray, image_shape=None) -> dict:
+        return self.extract_all_features(contour, points, image_shape)
+
+        return features
 
 class SimilarityCalculator:
     """相似度计算器 - 支持分层匹配策略"""
@@ -402,6 +406,42 @@ class SimilarityCalculator:
             return {'overall': 1.0, 'size': 1.0, 'geometric': 1.0, 'hu_moments': 1.0, 'fourier': 1.0}
         # 否则走原有逻辑
         return SimilarityCalculator().compare_contours(contours1, contours2)
+    
+    def cross_domain_match(self, contours1: dict, contours2: dict, config_type='cross_domain') -> tuple:
+        """跨域匹配：支持3D建模图与现实照片的匹配"""
+        try:
+            from cross_domain_config import CrossDomainConfig
+            
+            if config_type == 'cross_domain':
+                config = CrossDomainConfig.CROSS_DOMAIN_CONFIG
+            elif config_type == 'modeling':
+                config = CrossDomainConfig.MODELING_IMAGE_CONFIG
+            else:
+                config = CrossDomainConfig.REAL_PHOTO_CONFIG
+            
+            geo_sim = self.calculate_geometric_similarity(contours1, contours2)
+            hu_sim = self.calculate_hu_similarity(contours1, contours2)
+            fourier_sim = self.calculate_fourier_similarity(contours1, contours2)
+            
+            weights = config['similarity_weights']
+            total_similarity = (
+                geo_sim * weights['geometric'] +
+                hu_sim * weights['hu_moments'] +
+                fourier_sim * weights['fourier']
+            )
+            
+            threshold = config['thresholds']['fine_match']
+            is_match = total_similarity > threshold
+            
+            return total_similarity, is_match, {
+                'geometric': geo_sim,
+                'hu_moments': hu_sim,
+                'fourier': fourier_sim,
+                'config_used': config_type
+            }
+        except Exception as e:
+            logger.error(f"跨域匹配计算失败: {e}")
+            return 0.0, False, {}
 
 class DatabaseInterface:
     """数据库接口类"""
@@ -743,7 +783,7 @@ class ToothMatcher:
             area = cv2.contourArea(contour)
             length = cv2.arcLength(contour, True)
             points = contour[:, 0, :]
-            contours = self.feature_extractor.extract_all_contours(contour, points, image_shape=image_shape)
+            contours = self.feature_extractor.extract_all_features(contour, points, image_shape=image_shape)
             # if i == 1:  # 假设你要比对第1个色块
             #      print("【调试】当前色块特征：", contours)
             valid_contours.append({

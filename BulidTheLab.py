@@ -424,9 +424,12 @@ class ToothTemplateBuilder:
     def delete_template(self, tooth_id: str) -> bool:
         """删除指定模板"""
         try:
-            cursor = self.conn.cursor()
+            conn = sqlite3.connect(self.database_path)
+            cursor = conn.cursor()
             cursor.execute("DELETE FROM templates WHERE tooth_id = ?", (tooth_id,))
-            self.conn.commit()
+            conn.commit()
+            rowcount = cursor.rowcount
+            conn.close()
             
             json_path = self.templates_dir / "contours" / f"{tooth_id}.json"
             if json_path.exists():
@@ -440,10 +443,14 @@ class ToothTemplateBuilder:
             if features_path.exists():
                 features_path.unlink()
             
-            return cursor.rowcount > 0
+            return rowcount > 0
         except Exception as e:
             print(f"❌ 删除模板失败: {e}")
             return False
+        
+        contours_dir = self.templates_dir / "contours"
+        if not contours_dir.exists():
+            return []
         
         template_files = list(contours_dir.glob("TOOTH_*.json"))
         template_ids = [f.stem for f in template_files]
