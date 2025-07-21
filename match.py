@@ -11,6 +11,7 @@ import json
 import sqlite3
 from datetime import datetime
 import matplotlib.font_manager as fm
+from config import Config as PathConfig
 myfont = fm.FontProperties(fname=r"C:\Windows\Fonts\msyh.ttc")
 
 # 配置日志
@@ -23,7 +24,8 @@ matplotlib.rcParams['axes.unicode_minus'] = False  # 负号正常显示
 plt.rcParams['font.size'] = 10
 
 #TODO 修改图片路径
-PHOTO_PATH = r'c:\Users\Jason\Desktop\tooth\Tooth_5.png'
+path_config = PathConfig()
+PHOTO_PATH = path_config.get_photo_path()
 # 配置常量
 class Config:
     DEFAULT_HSV_TOLERANCE = {'h': 15, 's': 60, 'v': 60}
@@ -31,8 +33,8 @@ class Config:
     MIN_CONTOUR_POINTS = 20
     SIMILARITY_THRESHOLD = 0.99  # 改为1.0作为临界值
     SIZE_TOLERANCE = 0.3
-    DATABASE_PATH = "tooth_templates.db"
-    TEMPLATES_DIR = "templates"
+    DATABASE_PATH = path_config.get_database_path()
+    TEMPLATES_DIR = path_config.get_templates_dir()
   
 class FourierAnalyzer:
     """傅里叶级数分析器"""
