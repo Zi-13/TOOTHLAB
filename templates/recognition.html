@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+
+{% block title %}识别系统 - TOOTHLAB{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h2>牙齿识别系统</h2>
+        <p class="text-muted">上传现实牙齿照片，系统将自动识别并匹配模板</p>
+    </div>
+</div>
+
+<div class="row mt-3">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5>上传识别图像</h5>
+            </div>
+            <div class="card-body">
+                <form id="recognitionForm" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label for="imageFile" class="form-label">选择图像文件</label>
+                        <input type="file" class="form-control" id="imageFile" name="file" accept=".png,.jpg,.jpeg,.bmp" required>
+                        <div class="form-text">支持 PNG, JPG, JPEG, BMP 格式</div>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-search"></i> 开始识别
+                    </button>
+                </form>
+                
+                <div id="imagePreview" class="mt-3" style="display: none;">
+                    <h6>预览图像:</h6>
+                    <img id="previewImg" class="img-fluid" style="max-height: 300px;">
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5>识别结果</h5>
+            </div>
+            <div class="card-body">
+                <div id="recognitionResult">
+                    <div class="text-center text-muted">
+                        <i class="fas fa-image fa-3x mb-3"></i>
+                        <p>请上传图像开始识别</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5>识别历史</h5>
+            </div>
+            <div class="card-body">
+                <div id="recognitionHistory">
+                    <div class="text-center text-muted">暂无识别记录</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let recognitionHistory = [];
+
+document.getElementById('imageFile').addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (file) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            document.getElementById('previewImg').src = e.target.result;
+            document.getElementById('imagePreview').style.display = 'block';
+        };
+        reader.readAsDataURL(file);
+    }
+});
+
+document.getElementById('recognitionForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const fileInput = document.getElementById('imageFile');
+    const file = fileInput.files[0];
+    
+    if (!file) {
+        alert('请选择文件');
+        return;
+    }
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    const resultDiv = document.getElementById('recognitionResult');
+    resultDiv.innerHTML = `
+        <div class="text-center">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">识别中...</span>
+            </div>
+            <p class="mt-2">正在识别，请稍候...</p>
+        </div>
+    `;
+    
+    try {
+        const response = await fetch('/api/recognize', {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            displayRecognitionResult(data.results);
+            addToHistory(file.name, data.results);
+        } else {
+            throw new Error('识别失败');
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `
+            <div class="alert alert-danger">
+                <i class="fas fa-exclamation-circle"></i> 识别失败: ${error.message}
+            </div>
+        `;
+    }
+});
+
+function displayRecognitionResult(results) {
+    const resultDiv = document.getElementById('recognitionResult');
+    
+    if (results && results.length > 0) {
+        let html = '<div class="list-group">';
+        results.forEach((result, index) => {
+            html += `
+                <div class="list-group-item">
+                    <div class="d-flex w-100 justify-content-between">
+                        <h6 class="mb-1">匹配 ${index + 1}: ${result.template_id || '未知模板'}</h6>
+                        <small class="text-success">相似度: ${(result.similarity * 100).toFixed(1)}%</small>
+                    </div>
+                    <p class="mb-1">置信度: ${result.confidence || '中等'}</p>
+                    <small class="text-muted">操作建议: ${result.instruction || '请人工确认'}</small>
+                </div>
+            `;
+        });
+        html += '</div>';
+        resultDiv.innerHTML = html;
+    } else {
+        resultDiv.innerHTML = `
+            <div class="alert alert-warning">
+                <i class="fas fa-exclamation-triangle"></i> 未找到匹配的模板
+            </div>
+        `;
+    }
+}
+
+function addToHistory(filename, results) {
+    const timestamp = new Date().toLocaleString();
+    recognitionHistory.unshift({
+        filename,
+        timestamp,
+        results
+    });
+    
+    if (recognitionHistory.length > 10) {
+        recognitionHistory = recognitionHistory.slice(0, 10);
+    }
+    
+    updateHistoryDisplay();
+}
+
+function updateHistoryDisplay() {
+    const historyDiv = document.getElementById('recognitionHistory');
+    
+    if (recognitionHistory.length === 0) {
+        historyDiv.innerHTML = '<div class="text-center text-muted">暂无识别记录</div>';
+        return;
+    }
+    
+    let html = '<div class="list-group list-group-flush">';
+    recognitionHistory.forEach((record, index) => {
+        const bestMatch = record.results && record.results.length > 0 ? record.results[0] : null;
+        html += `
+            <div class="list-group-item">
+                <div class="d-flex w-100 justify-content-between">
+                    <h6 class="mb-1">${record.filename}</h6>
+                    <small>${record.timestamp}</small>
+                </div>
+                <p class="mb-1">
+                    ${bestMatch ? 
+                        `最佳匹配: ${bestMatch.template_id} (${(bestMatch.similarity * 100).toFixed(1)}%)` : 
+                        '无匹配结果'
+                    }
+                </p>
+            </div>
+        `;
+    });
+    html += '</div>';
+    historyDiv.innerHTML = html;
+}
+</script>
+{% endblock %}
