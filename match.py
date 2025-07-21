@@ -636,6 +636,8 @@ class ToothMatcher:
         # 修正 query_features_list 的生成方式
         query_features_list = [c['contours'] for c in valid_contours]
         matches = self.match_against_database(query_features_list)
+        print("【调试】matches keys:", list(matches.keys()))
+        print("【调试】valid_contours idx:", [c['idx'] for c in valid_contours])
         
         # 显示交互式界面
         self._show_interactive_display(color_extract, valid_contours, all_contours, matches)
@@ -811,18 +813,18 @@ class ToothMatcher:
         
         # 找到相似轮廓（当前图像内部）
         similar_contours = []
-        database_matches = {}
+        # database_matches = {}
         
         if highlight_idx is not None:
             target_contours = valid_contours[highlight_idx]['contours']
-            
             # 当前图像内相似轮廓
             similar_contours = self.find_similar_contours(target_contours, all_contours)
-            
-            # 数据库匹配
-            if self.templates:
-                query_features_list = [valid_contours[highlight_idx]['contours']]
-                database_matches = self.match_against_database(query_features_list)
+        
+        # 关键修正：始终传全局 matches 字典
+        if self.templates:
+            database_matches = matches if matches else {}
+        else:
+            database_matches = {}
         
         # 绘制所有轮廓
         for j, info in enumerate(valid_contours):
@@ -891,7 +893,7 @@ class ToothMatcher:
         
         # 更新数据库匹配视图
         if ax_db_matches and database_matches:
-            print("当前all_matches keys:", database_matches.keys(), "当前highlight_idx:", highlight_idx)
+            print("【调试】database_matches keys:", list(database_matches.keys()), "highlight_idx:", highlight_idx)
             self._update_database_matches_view(ax_db_matches, database_matches, highlight_idx)
         
         fig.canvas.draw_idle()
@@ -927,14 +929,24 @@ class ToothMatcher:
         return feature_info
     
     def _update_database_matches_view(self, ax_db_matches, database_matches, highlight_idx):
-        """更新数据库匹配视图"""
+        """更新数据库匹配视图（兼容多种key类型）"""
         ax_db_matches.clear()
         ax_db_matches.set_title("数据库匹配结果", fontproperties=myfont)
         ax_db_matches.axis('off')
 
-        key = f'query_{highlight_idx}'
-        if key in database_matches:
-            matches = database_matches[key]
+        # 支持多种key类型
+        key_candidates = [
+            f'query_{highlight_idx}',
+            str(highlight_idx),
+            highlight_idx
+        ]
+        found = False
+        for key in key_candidates:
+            if key in database_matches:
+                matches = database_matches[key]
+                found = True
+                break
+        if found:
             if matches:
                 match_text = f"🎯 色块 {highlight_idx+1} 的数据库匹配:\n\n"
                 match_text += f"{'排名':<4} {'模板ID':<15} {'相似度':<8} {'详细分数'}\n"
