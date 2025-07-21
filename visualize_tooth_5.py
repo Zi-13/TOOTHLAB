@@ -7,8 +7,13 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.font_manager as fm
 from pathlib import Path
 import json
+
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'DejaVu Sans', 'Arial']
+plt.rcParams['axes.unicode_minus'] = False
+chinese_font = fm.FontProperties(fname='/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc')
 
 def visualize_tooth_5_processing():
     """可视化Tooth_5.png的完整处理过程"""
@@ -53,24 +58,25 @@ def create_visualization_images(img_rgb, hsv, mask, contours):
     """创建处理步骤的可视化图像"""
     
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle('Tooth_5.png 处理过程可视化', fontsize=16, fontweight='bold')
+    fig.suptitle('Tooth_5.png 处理过程可视化', fontsize=16, fontweight='bold', fontproperties=chinese_font)
     
     axes[0, 0].imshow(img_rgb)
-    axes[0, 0].set_title('1. 原始图像 (794×585)', fontsize=12)
+    axes[0, 0].set_title('1. 原始图像 (794×585)', fontsize=12, fontproperties=chinese_font)
     axes[0, 0].axis('off')
     
     axes[0, 1].imshow(mask, cmap='gray')
-    axes[0, 1].set_title('2. HSV掩码 [0,0,0]-[15,60,61]', fontsize=12)
+    axes[0, 1].set_title('2. HSV掩码 [0,0,0]-[15,60,61]', fontsize=12, fontproperties=chinese_font)
     axes[0, 1].axis('off')
     
     contour_img = img_rgb.copy()
+    cmap = plt.get_cmap('tab10')
     for i, contour in enumerate(contours):
-        color = plt.cm.tab10(i % 10)[:3]  # 获取RGB颜色
+        color = cmap(i % 10)[:3]  # 获取RGB颜色
         color = tuple(int(c * 255) for c in color)
         cv2.drawContours(contour_img, [contour], -1, color, 2)
     
     axes[1, 0].imshow(contour_img)
-    axes[1, 0].set_title(f'3. 轮廓检测结果 ({len(contours)}个有效轮廓)', fontsize=12)
+    axes[1, 0].set_title(f'3. 轮廓检测结果 ({len(contours)}个有效轮廓)', fontsize=12, fontproperties=chinese_font)
     axes[1, 0].axis('off')
     
     create_contour_analysis_plot(axes[1, 1], contours)
@@ -82,24 +88,24 @@ def create_visualization_images(img_rgb, hsv, mask, contours):
 def create_contour_analysis_plot(ax, contours):
     """创建轮廓特征分析图"""
     if not contours:
-        ax.text(0.5, 0.5, '无有效轮廓', ha='center', va='center', transform=ax.transAxes)
-        ax.set_title('4. 轮廓特征分析', fontsize=12)
+        ax.text(0.5, 0.5, '无有效轮廓', ha='center', va='center', transform=ax.transAxes, fontproperties=chinese_font)
+        ax.set_title('4. 轮廓特征分析', fontsize=12, fontproperties=chinese_font)
         return
     
     areas = [cv2.contourArea(c) for c in contours]
     perimeters = [cv2.arcLength(c, True) for c in contours]
     
     ax.scatter(areas, perimeters, alpha=0.6, s=50)
-    ax.set_xlabel('轮廓面积')
-    ax.set_ylabel('轮廓周长')
-    ax.set_title(f'4. 轮廓特征分析 ({len(contours)}个轮廓)', fontsize=12)
+    ax.set_xlabel('轮廓面积', fontproperties=chinese_font)
+    ax.set_ylabel('轮廓周长', fontproperties=chinese_font)
+    ax.set_title(f'4. 轮廓特征分析 ({len(contours)}个轮廓)', fontsize=12, fontproperties=chinese_font)
     ax.grid(True, alpha=0.3)
     
     avg_area = np.mean(areas)
     avg_perimeter = np.mean(perimeters)
     ax.axvline(avg_area, color='red', linestyle='--', alpha=0.7, label=f'平均面积: {avg_area:.0f}')
     ax.axhline(avg_perimeter, color='blue', linestyle='--', alpha=0.7, label=f'平均周长: {avg_perimeter:.0f}')
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=8, prop=chinese_font)
 
 def create_contour_statistics(contours):
     """创建轮廓统计图表"""
@@ -110,24 +116,24 @@ def create_contour_statistics(contours):
     perimeters = [cv2.arcLength(c, True) for c in contours]
     
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-    fig.suptitle('Tooth_5.png 轮廓统计分析', fontsize=16, fontweight='bold')
+    fig.suptitle('Tooth_5.png 轮廓统计分析', fontsize=16, fontweight='bold', fontproperties=chinese_font)
     
     axes[0, 0].hist(areas, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
-    axes[0, 0].set_title(f'轮廓面积分布 (n={len(areas)})')
-    axes[0, 0].set_xlabel('面积')
-    axes[0, 0].set_ylabel('频次')
+    axes[0, 0].set_title(f'轮廓面积分布 (n={len(areas)})', fontproperties=chinese_font)
+    axes[0, 0].set_xlabel('面积', fontproperties=chinese_font)
+    axes[0, 0].set_ylabel('频次', fontproperties=chinese_font)
     axes[0, 0].grid(True, alpha=0.3)
     
     axes[0, 1].hist(perimeters, bins=20, alpha=0.7, color='lightcoral', edgecolor='black')
-    axes[0, 1].set_title(f'轮廓周长分布 (n={len(perimeters)})')
-    axes[0, 1].set_xlabel('周长')
-    axes[0, 1].set_ylabel('频次')
+    axes[0, 1].set_title(f'轮廓周长分布 (n={len(perimeters)})', fontproperties=chinese_font)
+    axes[0, 1].set_xlabel('周长', fontproperties=chinese_font)
+    axes[0, 1].set_ylabel('频次', fontproperties=chinese_font)
     axes[0, 1].grid(True, alpha=0.3)
     
     axes[1, 0].scatter(areas, perimeters, alpha=0.6, s=50, color='green')
-    axes[1, 0].set_xlabel('面积')
-    axes[1, 0].set_ylabel('周长')
-    axes[1, 0].set_title('面积 vs 周长关系')
+    axes[1, 0].set_xlabel('面积', fontproperties=chinese_font)
+    axes[1, 0].set_ylabel('周长', fontproperties=chinese_font)
+    axes[1, 0].set_title('面积 vs 周长关系', fontproperties=chinese_font)
     axes[1, 0].grid(True, alpha=0.3)
     
     stats_text = f"""统计摘要:
@@ -147,9 +153,9 @@ def create_contour_statistics(contours):
   标准差: {np.std(perimeters):.0f}"""
     
     axes[1, 1].text(0.05, 0.95, stats_text, transform=axes[1, 1].transAxes, 
-                    fontsize=10, verticalalignment='top', fontfamily='monospace',
+                    fontsize=10, verticalalignment='top', fontproperties=chinese_font,
                     bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
-    axes[1, 1].set_title('统计摘要')
+    axes[1, 1].set_title('统计摘要', fontproperties=chinese_font)
     axes[1, 1].axis('off')
     
     plt.tight_layout()
@@ -172,7 +178,7 @@ def create_matching_results_visualization():
         return
     
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    fig.suptitle('Tooth_5.png 匹配结果分析', fontsize=16, fontweight='bold')
+    fig.suptitle('Tooth_5.png 匹配结果分析', fontsize=16, fontweight='bold', fontproperties=chinese_font)
     
     areas = [f.get('area', 0) for f in features_list]
     circularities = [f.get('circularity', 0) for f in features_list]
@@ -180,21 +186,21 @@ def create_matching_results_visualization():
     aspect_ratios = [f.get('aspect_ratio', 0) for f in features_list]
     
     axes[0, 0].hist(areas, bins=15, alpha=0.7, color='skyblue', edgecolor='black')
-    axes[0, 0].set_title(f'面积分布 ({len(areas)}个特征)')
-    axes[0, 0].set_xlabel('面积')
-    axes[0, 0].set_ylabel('频次')
+    axes[0, 0].set_title(f'面积分布 ({len(areas)}个特征)', fontproperties=chinese_font)
+    axes[0, 0].set_xlabel('面积', fontproperties=chinese_font)
+    axes[0, 0].set_ylabel('频次', fontproperties=chinese_font)
     axes[0, 0].grid(True, alpha=0.3)
     
     axes[0, 1].hist(circularities, bins=15, alpha=0.7, color='lightcoral', edgecolor='black')
-    axes[0, 1].set_title('圆形度分布')
-    axes[0, 1].set_xlabel('圆形度')
-    axes[0, 1].set_ylabel('频次')
+    axes[0, 1].set_title('圆形度分布', fontproperties=chinese_font)
+    axes[0, 1].set_xlabel('圆形度', fontproperties=chinese_font)
+    axes[0, 1].set_ylabel('频次', fontproperties=chinese_font)
     axes[0, 1].grid(True, alpha=0.3)
     
     axes[1, 0].scatter(solidities, aspect_ratios, alpha=0.6, s=50, color='green')
-    axes[1, 0].set_xlabel('实心度')
-    axes[1, 0].set_ylabel('长宽比')
-    axes[1, 0].set_title('实心度 vs 长宽比')
+    axes[1, 0].set_xlabel('实心度', fontproperties=chinese_font)
+    axes[1, 0].set_ylabel('长宽比', fontproperties=chinese_font)
+    axes[1, 0].set_title('实心度 vs 长宽比', fontproperties=chinese_font)
     axes[1, 0].grid(True, alpha=0.3)
     
     success_rate = 100.0  # 从测试结果得知
@@ -209,8 +215,8 @@ def create_matching_results_visualization():
     non_zero_colors = [colors[i] for i in range(len(sizes)) if sizes[i] > 0]
     
     axes[1, 1].pie(non_zero_sizes, labels=non_zero_labels, colors=non_zero_colors, 
-                   autopct='%1.1f%%', startangle=90)
-    axes[1, 1].set_title(f'匹配结果分布\n(总成功率: {success_rate}%)')
+                   autopct='%1.1f%%', startangle=90, textprops={'fontproperties': chinese_font})
+    axes[1, 1].set_title(f'匹配结果分布\n(总成功率: {success_rate}%)', fontproperties=chinese_font)
     
     plt.tight_layout()
     plt.savefig('tooth_5_matching_results.png', dpi=300, bbox_inches='tight')
