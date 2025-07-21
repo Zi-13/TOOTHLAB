@@ -922,7 +922,8 @@ class ToothMatcher:
             if matches:
                 feature_info += f"\n🏆 数据库匹配 (前2名):\n"
                 for match in matches[:2]:
-                    feature_info += f"  {match['template_id']}: {match['similarity']:.3f}\n"
+                    match_id = f"{match['template_id']}-{match['template_contour_idx']+1}"
+                    feature_info += f"  {match_id}: {match['similarity']:.3f}\n"
             else:
                 feature_info += f"\n❌ 无数据库匹配"
         
@@ -934,7 +935,6 @@ class ToothMatcher:
         ax_db_matches.set_title("数据库匹配结果", fontproperties=myfont)
         ax_db_matches.axis('off')
 
-        # 支持多种key类型
         key_candidates = [
             f'query_{highlight_idx}',
             str(highlight_idx),
@@ -949,11 +949,13 @@ class ToothMatcher:
         if found:
             if matches:
                 match_text = f"🎯 色块 {highlight_idx+1} 的数据库匹配:\n\n"
-                match_text += f"{'排名':<4} {'模板ID':<15} {'相似度':<8} {'详细分数'}\n"
-                match_text += "-" * 50 + "\n"
+                match_text += f"{'排名':<4} {'模板ID-编号':<18} {'相似度':<8} {'详细分数'}\n"
+                match_text += "-" * 60 + "\n"
                 for i, match in enumerate(matches[:8]):
                     details = match['details']
-                    match_text += f"{i+1:<4} {match['template_id']:<15} {match['similarity']:<8.3f} "
+                    # 显示为 TOOTH_001-7
+                    match_id = f"{match['template_id']}-{match['template_contour_idx']+1}"
+                    match_text += f"{i+1:<4} {match_id:<18} {match['similarity']:<8.3f} "
                     match_text += f"几何:{details['geometric']:.2f} Hu:{details['hu_moments']:.2f}\n"
                 if len(matches) > 8:
                     match_text += f"\n... 还有 {len(matches)-8} 个匹配"
@@ -969,6 +971,9 @@ class ToothMatcher:
             match_text += "• 相似度低于阈值 (0.99)\n"
             match_text += "• 模板库中无相似轮廓\n"
             match_text += "• 特征提取失败"
+
+        # TODO: 支持点击匹配结果时高亮模板库中对应的轮廓（预留结构）
+        # 可在此处为每个 match_id 绑定事件，后续实现
 
         ax_db_matches.text(0.05, 0.95, match_text, transform=ax_db_matches.transAxes, 
                           fontsize=9, verticalalignment='top', fontproperties=myfont)
