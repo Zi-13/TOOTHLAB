@@ -534,6 +534,8 @@ class ToothMatcher:
         self.db_interface = DatabaseInterface()
         self.templates = load_features_templates()
         self.current_image_path = None
+        self.highlight_template = None  # 用于记录当前高亮的模板ID和轮廓编号
+        self.match_text_positions = []  # 用于记录每行匹配结果的坐标范围和对应的match_id
     
     def load_templates(self):
         """加载模板库"""
@@ -744,7 +746,7 @@ class ToothMatcher:
         # 初始化数据库匹配信息
         if self.templates:
             if ax_db_matches is not None:
-                ax_db_matches.set_title("数据库匹配结果", fontproperties=myfont)
+                ax_db_matches.set_title("数据库匹配结果 (点击高亮模板库轮廓)", fontproperties=myfont)
                 ax_db_matches.axis('off')
             if ax_stats is not None:
                 ax_stats.set_title("模板库统计", fontproperties=myfont)
@@ -778,6 +780,25 @@ class ToothMatcher:
             elif not self.templates and event.inaxes not in [ax_img, ax_fit, ax_zoom]:
                 return
                 
+            if self.templates and event.inaxes == ax_db_matches and event.xdata is not None and event.ydata is not None:
+                transform = ax_db_matches.transAxes.inverted()
+                click_x, click_y = transform.transform((event.xdata, event.ydata))
+                click_y = event.ydata / ax_db_matches.bbox.height if ax_db_matches.bbox.height > 0 else 0
+                
+                for pos_info in self.match_text_positions:
+                    if (pos_info['x_min'] <= click_x <= pos_info['x_max'] and 
+                        pos_info['y_min'] <= click_y <= pos_info['y_max']):
+                        self.highlight_template = {
+                            'template_id': pos_info['template_id'],
+                            'contour_idx': pos_info['template_contour_idx']
+                        }
+                        logger.info(f"点击了匹配结果: {pos_info['match_id']}")
+                        draw_all(highlight_idx=selected_idx[0])
+                        return
+                
+                self.highlight_template = None
+                draw_all(highlight_idx=selected_idx[0])
+                return
             x, y = int(event.xdata), int(event.ydata)
             for j, info in enumerate(valid_contours):
                 if cv2.pointPolygonTest(info['contour'], (x, y), False) >= 0:
@@ -788,9 +809,16 @@ class ToothMatcher:
         def on_key(event):
             if event.key == 'right':
                 selected_idx[0] = (selected_idx[0] + 1) % n_contours
+                self.highlight_template = None  # 清除模板高亮
                 draw_all(highlight_idx=selected_idx[0])
             elif event.key == 'left':
                 selected_idx[0] = (selected_idx[0] - 1) % n_contours
+                draw_all(highlight_idx=selected_idx[0])
+                self.highlight_template = None  # 清除模板高亮
+                draw_all(highlight_idx=selected_idx[0])
+            elif event.key == 'escape':
+                self.highlight_template = None
+                draw_all(highlight_idx=selected_idx[0])
                 draw_all(highlight_idx=selected_idx[0])
         
         draw_all(highlight_idx=selected_idx[0])
@@ -872,6 +900,39 @@ class ToothMatcher:
         self._update_info_display_enhanced(ax_fit, ax_zoom, valid_contours, all_contours, 
                                           highlight_idx, similar_contours, database_matches, 
                                           fig, ax_db_matches, matches)
+    def _draw_template_contour_highlight(self, ax_fit):
+        """绘制模板库轮廓高亮"""
+        if not self.highlight_template or not self.templates:
+            return
+        
+        template_id = self.highlight_template['template_id']
+        contour_idx = self.highlight_template['contour_idx']
+        
+        if template_id in self.templates:
+            template_features_list = self.templates[template_id]
+            if contour_idx < len(template_features_list):
+                template_features = template_features_list[contour_idx]
+                
+                if 'fourier_x_fit' in template_features and 'fourier_y_fit' in template_features:
+                    x_fit = template_features['fourier_x_fit']
+                    y_fit = template_features['fourier_y_fit']
+                    
+                    ax_fit.fill(x_fit, y_fit, color='purple', alpha=0.6, zorder=15, 
+                               label=f'模板 {template_id}-{contour_idx}')
+                    ax_fit.plot(x_fit, y_fit, '-', color='darkmagenta', linewidth=3, zorder=16)
+                    
+                    center_x, center_y = np.mean(x_fit), np.mean(y_fit)
+                    ax_fit.text(center_x, center_y, f'T{contour_idx+1}', 
+                               fontsize=12, fontweight='bold', 
+                               color='white', ha='center', va='center', zorder=17,
+                               bbox=dict(boxstyle="round,pad=0.3", facecolor='purple', alpha=0.8))
+                else:
+                    ax_fit.text(0.5, 0.5, f'模板 {template_id}-{contour_idx}\n无轮廓数据', 
+                               transform=ax_fit.transAxes, fontsize=12, 
+                               ha='center', va='center', color='purple',
+                               bbox=dict(boxstyle="round,pad=0.5", facecolor='white', alpha=0.8))
+
+
     
     def _update_info_display_enhanced(self, ax_fit, ax_zoom, valid_contours, all_contours, 
                                      highlight_idx, similar_contours, database_matches, 
@@ -931,8 +992,9 @@ class ToothMatcher:
     def _update_database_matches_view(self, ax_db_matches, database_matches, highlight_idx):
         """更新数据库匹配视图（兼容多种key类型）"""
         ax_db_matches.clear()
-        ax_db_matches.set_title("数据库匹配结果", fontproperties=myfont)
+        ax_db_matches.set_title("数据库匹配结果 (点击高亮模板库轮廓)", fontproperties=myfont)
         ax_db_matches.axis('off')
+        self.match_text_positions = []
 
         # 支持多种key类型
         key_candidates = [
@@ -951,10 +1013,25 @@ class ToothMatcher:
                 match_text = f"🎯 色块 {highlight_idx+1} 的数据库匹配:\n\n"
                 match_text += f"{'排名':<4} {'模板ID':<15} {'相似度':<8} {'详细分数'}\n"
                 match_text += "-" * 50 + "\n"
+                # 记录每行匹配结果的位置和对应的match_id
+                line_height = 0.04  # 每行的高度（相对坐标）
+                start_y = 0.75  # 开始位置的y坐标
+
                 for i, match in enumerate(matches[:8]):
                     details = match['details']
                     match_text += f"{i+1:<4} {match['template_id']:<15} {match['similarity']:<8.3f} "
                     match_text += f"几何:{details['geometric']:.2f} Hu:{details['hu_moments']:.2f}\n"
+                    line_y = start_y - i * line_height
+                    match_id = f"{match['template_id']}-{match['template_contour_idx']}"
+                    self.match_text_positions.append({
+                        'y_min': line_y - line_height/2,
+                        'y_max': line_y + line_height/2,
+                        'x_min': 0.05,
+                        'x_max': 0.95,
+                        'match_id': match_id,
+                        'template_id': match['template_id'],
+                        'template_contour_idx': match['template_contour_idx']
+                    })
                 if len(matches) > 8:
                     match_text += f"\n... 还有 {len(matches)-8} 个匹配"
             else:
