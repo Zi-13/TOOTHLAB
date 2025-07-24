@@ -5,8 +5,11 @@ import matplotlib
 import json
 import sqlite3
 import os
+import argparse
+import glob
 from datetime import datetime
 from pathlib import Path
+from typing import List, Dict, Optional, Tuple
 # 高性能库导入
 from scipy import ndimage
 from skimage.segmentation import watershed
@@ -254,6 +257,7 @@ class ToothTemplateBuilder:
                 x, y, w, h = cv2.boundingRect(contour)
                 # === 新增：提取高级特征 ===
                 features = self.feature_extractor.extract_all_features(contour, points, image_shape=self.current_image.shape if hasattr(self, 'current_image') and self.current_image is not None else None)
+                contour_info['features'] = features  # ★★★ 关键：加上这一行
                 contour_data = {
                     "idx": i,
                     "original_idx": contour_info['idx'],
@@ -430,6 +434,335 @@ class ToothTemplateBuilder:
                 print(f"   - {tid}")
         
         return sorted(template_ids)
+
+class BatchToothProcessor:
+    """批量牙齿图像处理器 - 基于现有的ToothTemplateBuilder"""
+    
+    def __init__(self, input_dir: str = "images", templates_dir: str = "templates", 
+                 database_path: str = "tooth_templates.db"):
+        self.input_dir = Path(input_dir)
+        self.templates_dir = Path(templates_dir)
+        self.database_path = database_path
+        self.builder = ToothTemplateBuilder(database_path, str(templates_dir))
+        
+        # 支持的图像格式
+        self.supported_formats = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif'}
+        
+        # 批量处理状态
+        self.processed_files: List[str] = []
+        self.failed_files: List[Tuple[str, str]] = []  # (文件名, 错误信息)
+        self.skipped_files: List[str] = []
+        
+        # 颜色模板缓存
+        self.color_template: Optional[Dict] = None
+        
+        print(f"🚀 批量处理器初始化完成")
+        print(f"   📁 输入目录: {self.input_dir}")
+        print(f"   📄 模板目录: {self.templates_dir}")
+        print(f"   🗄️ 数据库: {self.database_path}")
+    
+    def scan_image_files(self) -> List[Path]:
+        """扫描输入目录中的所有支持的图像文件"""
+        if not self.input_dir.exists():
+            raise FileNotFoundError(f"输入目录不存在: {self.input_dir}")
+        
+        image_files = []
+        for ext in self.supported_formats:
+            pattern = str(self.input_dir / f"*{ext}")
+            image_files.extend(glob.glob(pattern))
+            pattern = str(self.input_dir / f"*{ext.upper()}")
+            image_files.extend(glob.glob(pattern))
+        
+        image_files = [Path(f) for f in image_files]
+        image_files = sorted(set(image_files))  # 去重并排序
+        
+        print(f"📸 发现 {len(image_files)} 个图像文件:")
+        for i, file in enumerate(image_files[:10], 1):  # 只显示前10个
+            print(f"   {i:2d}. {file.name}")
+        if len(image_files) > 10:
+            print(f"   ... 还有 {len(image_files) - 10} 个文件")
+        
+        return image_files
+    
+    def is_already_processed(self, image_path: Path) -> bool:
+        """检查图像是否已经被处理过（通过数据库查询）"""
+        conn = sqlite3.connect(self.database_path)
+        cursor = conn.cursor()
+        try:
+            cursor.execute('SELECT tooth_id FROM templates WHERE image_path = ?', (str(image_path),))
+            result = cursor.fetchone()
+            return result is not None
+        except Exception:
+            return False
+        finally:
+            conn.close()
+    
+    def get_color_template_from_first_image(self, first_image_path: Path) -> Optional[Dict]:
+        """从第一张图像获取颜色模板（交互式选择）"""
+        print(f"\n🎨 请在第一张图像中选择目标颜色:")
+        print(f"📸 {first_image_path.name}")
+        
+        img = cv2.imread(str(first_image_path))
+        if img is None:
+            print(f"❌ 无法读取图像: {first_image_path}")
+            return None
+        
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        picked = []
+        
+        def on_mouse(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                color = hsv[y, x]
+                print(f"选中点HSV: {color}")
+                picked.append(color)
+        
+        cv2.imshow("点击选取目标区域颜色 (ESC退出, 多点选择后按ESC)", img)
+        cv2.setMouseCallback("点击选取目标区域颜色 (ESC退出, 多点选择后按ESC)", on_mouse)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        
+        if not picked:
+            print("❌ 未选取颜色")
+            return None
+        
+        # 计算HSV平均值
+        hsv_arr = np.array(picked)
+        h_mean, s_mean, v_mean = np.mean(hsv_arr, axis=0).astype(int)
+        
+        # 创建颜色模板
+        color_template = {
+            'h_mean': int(h_mean),
+            's_mean': int(s_mean),
+            'v_mean': int(v_mean),
+            'lower': [0, 0, 0],  # 可以根据需要调整
+            'upper': [15, 60, 61],  # 可以根据需要调整
+            'picked_points': len(picked)
+        }
+        
+        print(f"✅ 颜色模板创建成功:")
+        print(f"   HSV均值: ({h_mean}, {s_mean}, {v_mean})")
+        print(f"   选取点数: {len(picked)}")
+        
+        return color_template
+    
+    def process_single_image_with_template(self, image_path: Path, 
+                                         color_template: Dict, 
+                                         show_interactive: bool = False) -> bool:
+        """使用颜色模板自动处理单张图像"""
+        try:
+            print(f"🔄 处理中: {image_path.name}")
+            
+            # 读取图像
+            img = cv2.imread(str(image_path))
+            if img is None:
+                raise ValueError(f"无法读取图像: {image_path}")
+            
+            # 应用颜色模板进行HSV掩码
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            lower = np.array(color_template['lower'])
+            upper = np.array(color_template['upper'])
+            
+            mask = cv2.inRange(hsv, lower, upper)
+            
+            # 形态学操作
+            kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+            
+            # 智能分离
+            mask_processed = choose_separation_method(mask)
+            
+            # 轮廓检测
+            contours, _ = cv2.findContours(mask_processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            valid_contours = []
+            
+            for i, contour in enumerate(contours):
+                if contour.shape[0] < 20:
+                    continue
+                area = cv2.contourArea(contour)
+                length = cv2.arcLength(contour, True)
+                valid_contours.append({
+                    'contour': contour,
+                    'points': contour[:, 0, :],
+                    'area': area,
+                    'length': length,
+                    'idx': i
+                })
+            
+            if not valid_contours:
+                raise ValueError("未检测到有效轮廓")
+            
+            # 生成牙齿ID
+            tooth_id = self.builder.get_next_tooth_id()
+            
+            # 创建HSV信息
+            hsv_info = {
+                'h_mean': color_template['h_mean'],
+                's_mean': color_template['s_mean'],
+                'v_mean': color_template['v_mean'],
+                'lower': color_template['lower'],
+                'upper': color_template['upper']
+            }
+            
+            # 自动保存（不显示交互界面）
+            success = self.builder.serialize_contours(
+                valid_contours, tooth_id, str(image_path), hsv_info, auto_save=True
+            )
+            
+            if success:
+                print(f"✅ {image_path.name} -> {tooth_id} ({len(valid_contours)}个轮廓)")
+                return True
+            else:
+                raise ValueError("保存失败")
+                
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ {image_path.name}: {error_msg}")
+            self.failed_files.append((str(image_path), error_msg))
+            return False
+    
+    def process_batch(self, skip_processed: bool = True, 
+                     interactive_first: bool = True,
+                     show_progress: bool = True) -> Dict:
+        """批量处理所有图像"""
+        print(f"\n🚀 开始批量处理...")
+        print("=" * 60)
+        
+        # 扫描图像文件
+        image_files = self.scan_image_files()
+        if not image_files:
+            print("❌ 没有找到可处理的图像文件")
+            return self._generate_report()
+        
+        # 过滤已处理的文件
+        if skip_processed:
+            unprocessed_files = []
+            for img_file in image_files:
+                if self.is_already_processed(img_file):
+                    self.skipped_files.append(str(img_file))
+                    print(f"⏭️  跳过已处理: {img_file.name}")
+                else:
+                    unprocessed_files.append(img_file)
+            image_files = unprocessed_files
+        
+        if not image_files:
+            print("✅ 所有图像都已处理完成")
+            return self._generate_report()
+        
+        print(f"\n📊 待处理图像: {len(image_files)} 个")
+        
+        # 获取颜色模板
+        if interactive_first and self.color_template is None:
+            self.color_template = self.get_color_template_from_first_image(image_files[0])
+            if self.color_template is None:
+                print("❌ 无法获取颜色模板，批量处理终止")
+                return self._generate_report()
+        
+        # 处理所有图像
+        total_files = len(image_files)
+        for i, img_file in enumerate(image_files, 1):
+            if show_progress:
+                print(f"\n📈 进度: {i}/{total_files} ({i/total_files*100:.1f}%)")
+            
+            success = self.process_single_image_with_template(
+                img_file, self.color_template, show_interactive=False
+            )
+            
+            if success:
+                self.processed_files.append(str(img_file))
+        
+        return self._generate_report()
+    
+    def _generate_report(self) -> Dict:
+        """生成批量处理报告"""
+        total_found = len(self.processed_files) + len(self.failed_files) + len(self.skipped_files)
+        
+        report = {
+            'total_found': total_found,
+            'processed': len(self.processed_files),
+            'failed': len(self.failed_files),
+            'skipped': len(self.skipped_files),
+            'success_rate': len(self.processed_files) / max(1, total_found - len(self.skipped_files)) * 100,
+            'processed_files': self.processed_files,
+            'failed_files': self.failed_files,
+            'skipped_files': self.skipped_files
+        }
+        
+        # 打印报告
+        print(f"\n" + "=" * 60)
+        print(f"🎉 批量处理完成！")
+        print(f"=" * 60)
+        print(f"📊 处理统计:")
+        print(f"   🔍 发现文件: {report['total_found']} 个")
+        print(f"   ✅ 成功处理: {report['processed']} 个")
+        print(f"   ❌ 处理失败: {report['failed']} 个")
+        print(f"   ⏭️  跳过文件: {report['skipped']} 个")
+        print(f"   📈 成功率: {report['success_rate']:.1f}%")
+        
+        if self.failed_files:
+            print(f"\n❌ 失败文件详情:")
+            for file_path, error in self.failed_files:
+                print(f"   • {Path(file_path).name}: {error}")
+        
+        return report
+
+def process_image_with_color_template(image_path: str, color_template: Dict, 
+                                    tooth_id: Optional[str] = None) -> bool:
+    """修改后的颜色处理函数，支持预设颜色模板"""
+    builder = ToothTemplateBuilder()
+    
+    img = cv2.imread(image_path)
+    if img is None:
+        print(f"❌ 图片读取失败: {image_path}")
+        return False
+    
+    # 使用预设的颜色模板
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    lower = np.array(color_template['lower'])
+    upper = np.array(color_template['upper'])
+    
+    hsv_info = {
+        'h_mean': color_template['h_mean'],
+        's_mean': color_template['s_mean'], 
+        'v_mean': color_template['v_mean'],
+        'lower': color_template['lower'],
+        'upper': color_template['upper']
+    }
+    
+    mask = cv2.inRange(hsv, lower, upper)
+    
+    # 其余处理逻辑与原函数相同...
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+    
+    mask_processed = choose_separation_method(mask)
+    contours, _ = cv2.findContours(mask_processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    
+    valid_contours = []
+    for i, contour in enumerate(contours):
+        if contour.shape[0] < 20:
+            continue
+        area = cv2.contourArea(contour)
+        length = cv2.arcLength(contour, True)
+        valid_contours.append({
+            'contour': contour,
+            'points': contour[:, 0, :],
+            'area': area,
+            'length': length,
+            'idx': i
+        })
+    
+    if not valid_contours:
+        print("❌ 未检测到有效轮廓")
+        return False
+    
+    if tooth_id is None:
+        tooth_id = builder.get_next_tooth_id()
+    
+    success = builder.serialize_contours(valid_contours, tooth_id, image_path, hsv_info, auto_save=True)
+    if success:
+        print(f"✅ 自动处理完成: {tooth_id} ({len(valid_contours)}个轮廓)")
+    
+    return success
 
 def pick_color_and_draw_edge(image_path, tooth_id=None):
     # 初始化模板建立器
@@ -1122,11 +1455,22 @@ def show_separation_comparison(original_mask, processed_mask, image_path):
     print(f"   📊 面积保持率: {sum(areas_after)/sum(areas_before)*100:.1f}%")
 
 def save_features_only(valid_contours, tooth_id, features_dir="templates/features"):
-    """只保存特征向量到特征文件"""
     from pathlib import Path
+    import numpy as np
+
+    def to_serializable(feat):
+        # 把所有 ndarray 转成 list
+        if isinstance(feat, np.ndarray):
+            return feat.tolist()
+        if isinstance(feat, dict):
+            return {k: to_serializable(v) for k, v in feat.items()}
+        if isinstance(feat, list):
+            return [to_serializable(x) for x in feat]
+        return feat
+
     features_dir = Path(features_dir)
     features_dir.mkdir(parents=True, exist_ok=True)
-    features_list = [contour['features'] for contour in valid_contours]
+    features_list = [to_serializable(contour['features']) for contour in valid_contours]
     features_path = features_dir / f"{tooth_id}_features.json"
     with open(features_path, 'w', encoding='utf-8') as f:
         json.dump({"features": features_list}, f, ensure_ascii=False, indent=2)
@@ -1135,32 +1479,116 @@ def save_features_only(valid_contours, tooth_id, features_dir="templates/feature
 
 def main():
     """
-    高性能牙齿模板建立器主程序
+    高性能牙齿模板建立器主程序 - 支持单张和批量处理
     """
-    print("🚀 启动高性能牙齿模板建立器")
+    parser = argparse.ArgumentParser(description='牙齿模板建立器')
+    parser.add_argument('--batch', action='store_true', help='启用批量处理模式')
+    parser.add_argument('--input-dir', default='images', help='输入目录路径 (默认: images)')
+    parser.add_argument('--output-dir', default='templates', help='输出目录路径 (默认: templates)')
+    parser.add_argument('--database', default='tooth_templates.db', help='数据库路径 (默认: tooth_templates.db)')
+    parser.add_argument('--skip-processed', action='store_true', default=True, 
+                       help='跳过已处理的文件 (默认: True)')
+    parser.add_argument('--single-image', help='处理单张图像的路径')
+    
+    args = parser.parse_args()
+    
+    if args.batch:
+        # 批量处理模式
+        print("🚀 启动批量牙齿模板建立器")
+        print("=" * 60)
+        
+        processor = BatchToothProcessor(
+            input_dir=args.input_dir,
+            templates_dir=args.output_dir,
+            database_path=args.database
+        )
+        
+        try:
+            report = processor.process_batch(
+                skip_processed=args.skip_processed,
+                interactive_first=True,
+                show_progress=True
+            )
+            
+            # 显示最终统计
+            if report['processed'] > 0:
+                print(f"\n🎯 批量处理成功完成!")
+                print(f"✅ 已创建 {report['processed']} 个牙齿模板")
+                
+                # 显示已保存的模板列表
+                processor.builder.list_templates()
+            
+        except Exception as e:
+            print(f"❌ 批量处理过程中发生错误: {e}")
+            print("💡 请检查输入目录和文件权限")
+    
+    elif args.single_image:
+        # 单张图像处理模式
+        print("🚀 启动单张图像处理模式")
+        print("=" * 50)
+        
+        image_path = args.single_image
+        if not os.path.exists(image_path):
+            print(f"❌ 图像文件不存在: {image_path}")
+            return
+        
+        print(f"📸 正在处理图像: {image_path}")
+        
+        try:
+            pick_color_and_draw_edge(image_path, tooth_id=None)
+            print("\n🎉 单张图像处理完成！")
+        except Exception as e:
+            print(f"❌ 处理过程中发生错误: {e}")
+            
+    else:
+        # 默认单张处理模式（使用PHOTO_PATH）
+        print("🚀 启动高性能牙齿模板建立器")
+        print("=" * 50)
+        
+        # 自动生成连续编号，无需用户输入
+        tooth_id = None  # 将自动生成 TOOTH_001, TOOTH_002...
+        
+        # 图像路径
+        image_path = PHOTO_PATH 
+        
+        # 检查文件是否存在
+        if not os.path.exists(image_path):
+            print(f"❌ 图像文件不存在: {image_path}")
+            print("💡 请检查文件路径是否正确")
+            print(f"💡 或使用 --single-image 指定图像路径")
+            print(f"💡 或使用 --batch --input-dir 指定批量处理目录")
+            return
+        
+        print(f"📸 正在处理图像: {image_path}")
+        
+        try:
+            # 启动高性能分离和模板建立（自动保存）
+            pick_color_and_draw_edge(image_path, tooth_id)
+            print("\n🎉 高性能处理完成！")
+        except Exception as e:
+            print(f"❌ 处理过程中发生错误: {e}")
+            print("💡 请检查图像文件和依赖库是否正确安装")
+
+def main_batch_example():
+    """批量处理示例函数"""
+    print("🚀 批量处理示例")
     print("=" * 50)
     
-    # 自动生成连续编号，无需用户输入
-    tooth_id = None  # 将自动生成 TOOTH_001, TOOTH_002...
+    # 创建批量处理器
+    processor = BatchToothProcessor(
+        input_dir="images",  # 你的图像目录
+        templates_dir="templates",
+        database_path="tooth_templates.db"
+    )
     
-    # 图像路径
-    image_path = PHOTO_PATH 
+    # 开始批量处理
+    report = processor.process_batch(
+        skip_processed=True,     # 跳过已处理的文件
+        interactive_first=True,  # 第一张图交互选色
+        show_progress=True       # 显示进度
+    )
     
-    # 检查文件是否存在
-    if not os.path.exists(image_path):
-        print(f"❌ 图像文件不存在: {image_path}")
-        print("💡 请检查文件路径是否正确")
-        return
-    
-    print(f"📸 正在处理图像: {image_path}")
-    
-    try:
-        # 启动高性能分离和模板建立（自动保存）
-        pick_color_and_draw_edge(image_path, tooth_id)
-        print("\n🎉 高性能处理完成！")
-    except Exception as e:
-        print(f"❌ 处理过程中发生错误: {e}")
-        print("💡 请检查图像文件和依赖库是否正确安装")
+    return report
 
 if __name__ == "__main__":
     main()
